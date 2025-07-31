@@ -22,7 +22,7 @@ model_deployment = os.getenv("MODEL_DEPLOYMENT_NAME")
 async def connect_to_server(exit_stack: AsyncExitStack):
     server_params = StdioServerParameters(
         command="python",
-        args=["src\\server.py"],
+        args=["C:\\MCP APPLICATION\\MCP-Application\\src\\server.py"],
         env=None
     )
 
@@ -73,11 +73,15 @@ async def chat_loop(session):
     # Create the agent
     agent = agents_client.create_agent(
         model=model_deployment,
-        name="mcp-agent",
+        name="mcp-agent-v-r",
         instructions="""
         You are an powerbi semantic model assistant. Here are some general guidelines:
         - you to need help the data analyst to build the semantic models/datasets.
         - you need to generate the dax queries as requested by the user and execute and show the output for it.
+            - **Tool Usage Guide:**
+        - for 'connect', use this exact server_name and database_name simple json format parameters with out any kwargs. for example connect(server_name = "powerbi://api.powerbi.com/v1.0/myorg/workspace", database_name = "catalog_name")
+        - for 'update_column_names', use this exact table_name, old_col_name and new_col_name simple json format parameters with out any kwargs. 
+        - for 'connect', use use  server_name and database_name as standalone paraemters instead of kwargs.
         """,
         tools=mcp_function_tool.definitions
    )

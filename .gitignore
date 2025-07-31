@@ -38,10 +38,10 @@ venv
 .pydevproject
 
 # Environment Variables - CRITICAL FOR SECURITY
-.env
 .env.local
 .env.*.local
 *.env
+.env
 
 # Logs
 *.log
