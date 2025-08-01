@@ -22,7 +22,7 @@ model_deployment = os.getenv("MODEL_DEPLOYMENT_NAME")
 async def connect_to_server(exit_stack: AsyncExitStack):
     server_params = StdioServerParameters(
         command="python",
-        args=["C:\\MCP APPLICATION\\MCP-Application\\src\\server.py"],
+        args=[os.getenv("SERVER_PATH")],
         env=None
     )
 
