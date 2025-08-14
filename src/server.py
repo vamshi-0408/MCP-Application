@@ -286,7 +286,7 @@ class Fabric:
         except Exception as e:
             return f"{str(e)}"
 
-    async def create_lakehouse_shortcut(self, target_workspace: str = None, target_lakehouse: str = None, target_shortcut_path: str = None, target_shortcut_name: str = None, source_workspace: str = None, source_lakehouse: str = None, source_path: str = None, approved: bool = False) -> dict:
+    async def create_lakehouse_shortcut(self, target_workspace: str = None, target_lakehouse: str = None, target_shortcut_path: str = None, target_shortcut_name: str = None, source_workspace: str = None, source_lakehouse: str = None, source_path: str = None, approved: bool = None) -> dict:
         """Creating shortcuts from authoritative workspace and lakehouse into target workspace, target lakehouse and target path with MCP elicitation for approval."""
         try:
             # If no parameters provided, return elicitation prompt to collect all details
@@ -1353,8 +1353,7 @@ class PowerBIMCPServer:
                 description="Create a lakehouse shortcut with MCP elicitation for approval.",
                 inputSchema={
                     "type": "object",
-                    "properties": {
-                    },
+                    "properties": {},
                     "required": []
                 }
             ),
