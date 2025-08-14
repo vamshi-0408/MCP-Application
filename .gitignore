@@ -92,3 +92,7 @@ connection_strings.txt
 tmp/
 temp/
 *.tmp
+
+# Documentation files to ignore
+copilot-instructions.MD
+Business Requirements.MD
