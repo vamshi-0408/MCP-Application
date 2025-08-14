@@ -50,7 +50,7 @@ clr.AddReference(os.path.join(dll_folder, "Microsoft.AnalysisServices.Tabular.dl
 clr.AddReference(os.path.join(dll_folder, "Microsoft.AnalysisServices.Core.dll"))
 clr.AddReference(os.path.join(adomd_path, "Microsoft.AnalysisServices.AdomdClient.dll"))
 
-from Microsoft.AnalysisServices.Tabular import Server as TabularServer, Table as TabularTable, EntityPartitionSource, RefreshType, DataType, DataColumn, Partition as TabularPartition, ModeType  # type: ignore
+from Microsoft.AnalysisServices.Tabular import Server as TabularServer, Table as TabularTable, EntityPartitionSource, RefreshType, DataType, DataColumn, Partition as TabularPartition, ModeType, ModelRole, TablePermission, MetadataPermission,SingleColumnRelationship,ModelPermission, CrossFilteringBehavior,CalculatedPartitionSource,Measure # type: ignore
 from Microsoft.AnalysisServices.AdomdClient import AdomdSchemaGuid  # type: ignore
 from Microsoft.AnalysisServices.AdomdClient import AdomdConnection, AdomdCommand  # type: ignore
 
@@ -593,12 +593,7 @@ class TabularEditor:
         }
     
     def create_semantic_model(self, workspace_identifier: str, lakehouse_identifier:str ,semantic_model_name: str, selected_tables: List[str] = None, description: str = None) -> Dict[str, Any]:
-        """Create a comprehensive DirectLake semantic model using TMSL for full DAX Studio and XMLA support with automatic refresh"""
-        
-        # IMMEDIATE TEST - This should appear in logs if our code is running
-        print("🔥🔥🔥 VAMSHI CODE IS EXECUTING 🔥🔥🔥")
-        logger.error("🔥🔥🔥 VAMSHI CODE IS EXECUTING 🔥🔥🔥")
-        
+        """Create a comprehensive DirectLake semantic model using TMSL for full DAX Studio and XMLA support with automatic refresh"""    
         try:
             # Debug: Log input parameters
             debug_start = {
@@ -807,7 +802,7 @@ class TabularEditor:
             # Execute the TMSL command
             result = server.Execute(json.dumps(tmsl_create_command))
             logger.info(f"TMSL execution result: {result}")
-                       # Wait a moment and try to verify the model was created
+
             import time
             time.sleep(10)  # Give model time to be available
             server.Refresh()
@@ -817,42 +812,18 @@ class TabularEditor:
             created_model = server.Databases.Find(semantic_model_name)
             if created_model:
                 logger.info(f"Successfully verified model '{semantic_model_name}' was created")
-                
-                # Automatically refresh the model immediately after creation
-                if tmsl_tables:  # Only refresh if there are tables
-                    logger.info("Starting Automatic Refresh")
-                    try:
-                        created_model.Model.RequestRefresh(RefreshType.Full)
-                        created_model.Model.SaveChanges()
-                        logger.info("Model refreshed successfully immediately after creation")
-                        refresh_success = True
-                        refresh_message = "Model created and refreshed successfully"
-                    except Exception as refresh_error:
-                        refresh_error_msg = str(refresh_error).encode('ascii', 'replace').decode('ascii')
-                        logger.warning(f"Refresh failed: {refresh_error_msg}")
-                        refresh_success = False
-                        refresh_message = f"Model created but refresh failed: {str(refresh_error)}"
-                else:
-                    refresh_success = True
-                    refresh_message = "Model created successfully (no tables to refresh)"
-            else:
-                logger.warning(f"Model '{semantic_model_name}' not found immediately after creation")
-                refresh_success = False
-                refresh_message = "Model creation status unclear"
-            
-            server.Disconnect()
+            self.model = created_model.Model
+            self.connected = True
             logger.info("Disconnected from Analysis Services")
             
             # Prepare the result
             creation_result = {
                 "success": True, 
-                "message": refresh_message,
                 "workspace_id": workspace_id,
                 "workspace_name": workspace_name,
                 "model_name": semantic_model_name,
                 "tables_added": [table['name'] for table in tmsl_tables],
-                "total_tables": len(tmsl_tables),
-                "refresh_success": refresh_success
+                "total_tables": len(tmsl_tables)
             }
             self.refresh_semantic_model(workspace_id, semantic_model_name)
             return creation_result
@@ -951,7 +922,14 @@ class TabularEditor:
         # Create and add the new measure
         logger.info(f"Creating measure '{measure_name}' in table '{table.Name}'...")
         try:
-            new_measure = table.AddMeasure(measure_name, dax_expression, "")
+            # Create a new Measure object
+            new_measure = Measure()
+            new_measure.Name = measure_name
+            new_measure.Expression = dax_expression
+            new_measure.Description = ""
+            
+            # Add the measure to the table's Measures collection
+            table.Measures.Add(new_measure)
             self.model.SaveChanges()
             logger.info(f"✅ Measure '{measure_name}' created successfully in table '{table.Name}'")
             return f"✅ Measure '{measure_name}' created successfully in table '{table.Name}'"
@@ -1203,6 +1181,71 @@ class TabularEditor:
         logger.info("✅ Model changes saved and refreshed.")
 
         return f"✅ Table '{old_table_name}' renamed to '{new_table_name}' with {len(updated_objects)} dependent objects updated."
+    
+    def create_relationship(self, from_table: str, from_column: str, to_table: str, to_column: str, 
+                       is_active: bool = True, cross_filter_direction: str = "OneDirection") -> str:
+        """Create a relationship between two tables in the tabular model."""
+        if not self.connected:
+            raise Exception("Tabular server is not connected. Try Connecting to SQL endpoint and Database.")
+        try:
+            # Find the tables
+            from_table_obj = next((t for t in self.model.Tables if t.Name.lower() == from_table.lower()), None)
+            if not from_table_obj:
+                raise Exception(f"From table '{from_table}' not found in the model.")
+            
+            to_table_obj = next((t for t in self.model.Tables if t.Name.lower() == to_table.lower()), None)
+            if not to_table_obj:
+                raise Exception(f"To table '{to_table}' not found in the model.")
+            
+            # Find the columns
+            from_column_obj = next((c for c in from_table_obj.Columns if c.Name.lower() == from_column.lower()), None)
+            if not from_column_obj:
+                raise Exception(f"Column '{from_column}' not found in table '{from_table}'.")
+            
+            to_column_obj = next((c for c in to_table_obj.Columns if c.Name.lower() == to_column.lower()), None)
+            if not to_column_obj:
+                raise Exception(f"Column '{to_column}' not found in table '{to_table}'.")
+            
+            # Check if relationship already exists
+            existing_rel = next((rel for rel in self.model.Relationships 
+                               if rel.FromTable.Name.lower() == from_table.lower() and 
+                                  rel.FromColumn.Name.lower() == from_column.lower() and
+                                  rel.ToTable.Name.lower() == to_table.lower() and
+                                  rel.ToColumn.Name.lower() == to_column.lower()), None)
+            
+            if existing_rel:
+                raise Exception(f"Relationship already exists between {from_table}[{from_column}] and {to_table}[{to_column}]")
+            
+            # Create new relationship
+            new_relationship = SingleColumnRelationship()
+            new_relationship.Name = f"{from_table}_{from_column}_to_{to_table}_{to_column}"
+            new_relationship.FromTable = from_table_obj
+            new_relationship.FromColumn = from_column_obj
+            new_relationship.ToTable = to_table_obj
+            new_relationship.ToColumn = to_column_obj
+            new_relationship.IsActive = is_active
+            
+            # Set cross filter direction
+            if cross_filter_direction.lower() == "onedirection":
+                new_relationship.CrossFilteringBehavior = CrossFilteringBehavior.OneDirection
+            elif cross_filter_direction.lower() == "bothdirections":
+                new_relationship.CrossFilteringBehavior = CrossFilteringBehavior.BothDirections
+            elif cross_filter_direction.lower() == "automatic":
+                new_relationship.CrossFilteringBehavior = CrossFilteringBehavior.Automatic
+            else:
+                new_relationship.CrossFilteringBehavior = CrossFilteringBehavior.OneDirection
+            
+            # Add relationship to model
+            self.model.Relationships.Add(new_relationship)
+            self.model.SaveChanges()
+            
+            success_msg = f"✅ Relationship created: {from_table}[{from_column}] -> {to_table}[{to_column}]"
+            logger.info(success_msg)
+            return success_msg
+            
+        except Exception as e:
+            logger.error(f"Failed to create relationship: {e}")
+            raise Exception(f"Failed to create relationship: {e}")
 
 class PowerBIMCPServer:
     def __init__(self):
@@ -1251,6 +1294,22 @@ class PowerBIMCPServer:
                         "table_name": {"type": "string"}
                     },
                     "required": ["table_name"]
+                }
+            ),
+            Tool(
+                name="create_relationship",
+                description="Create a new relationship between two tables.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "from_table": {"type": "string"},
+                        "from_column": {"type": "string"},
+                        "to_table": {"type": "string"},
+                        "to_column": {"type": "string"},
+                        "is_active": {"type": "boolean"},
+                        "cross_filter_direction": {"type": "string"}
+                    },
+                    "required": ["from_table", "from_column", "to_table", "to_column"]
                 }
             ),
             Tool(
@@ -1436,17 +1495,6 @@ class PowerBIMCPServer:
                 }
             ),
             Tool(
-                name="select_tables_with_schema",
-                description="Select specific tables and return their schemas, or return all tables if none specified",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "selected_table_names": {"type": "array", "items": {"type": "string"}, "description": "Optional list of specific table names to get schema for"}
-                    },
-                    "required": []
-                }
-            ),
-            Tool(
                 name="refresh_semantic_model",
                 description="Refresh a Power BI dataset using workspace_identifier (workspace name or ID) and database_name (dataset name)",
                 inputSchema={
@@ -1499,8 +1547,6 @@ class PowerBIMCPServer:
                     result = await self._handle_disconnect_dataset(arguments)
                 elif name == "create_semantic_model":
                     result = await self._handle_create_semantic_model(arguments)
-                elif name == "select_tables_with_schema":
-                    result = await self._handle_select_tables_with_schema(arguments)
                 elif name == "refresh_semantic_model":
                     result = await self._handle_refresh_semantic_model(arguments)
                 elif name == "execute_dax_query":
@@ -1513,6 +1559,8 @@ class PowerBIMCPServer:
                     result = await self._handle_update_column_names(arguments)
                 elif name == "update_table_name":
                     result = await self._handle_update_table_name(arguments)
+                elif name == "create_relationship":
+                    result = await self._handle_create_relationship(arguments)
                 else:
                     logger.warning(f"Unknown tool: {name}")
                     return [TextContent(type="text", text=f"Unknown tool: {name}")]
@@ -1534,6 +1582,27 @@ class PowerBIMCPServer:
                     self.sql_endpoint.initialize_sql_connection,
                     arguments["sql_endpoint"],
                     arguments["sql_database"]
+                )
+                return str(result)
+
+        except Exception as e:
+            logger.error(f"Connection failed: {str(e)}")
+            return f"Connection failed: {str(e)}"
+
+    async def _handle_create_relationship(self, arguments: Dict[str, Any]) -> str:
+        """Handle creation of a new relationship"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.tabular_editor.create_relationship,
+                    arguments["from_table"],
+                    arguments["from_column"],
+                    arguments["to_table"],
+                    arguments["to_column"],
+                    arguments["is_active"],
+                    arguments["cross_filter_direction"]
                 )
                 return str(result)
 
@@ -1820,21 +1889,6 @@ class PowerBIMCPServer:
             print(f"🔥 ERROR in handler: {str(e)}")
             logger.error(f"🔥 ERROR in handler: {str(e)}")
             return f"Error creating semantic model: {str(e)}"
-
-    async def _handle_select_tables_with_schema(self, arguments: Dict[str, Any]) -> str:
-        """Handle selection of tables with schema"""
-        try:
-            with self.connection_lock:
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    self.tabular_editor.select_tables_with_schema,
-                    arguments.get("selected_table_names")
-                )
-                return json.dumps(result)
-
-        except Exception as e:
-            logger.error(f"Error selecting tables with schema: {str(e)}")
-            return f"Error selecting tables with schema: {str(e)}"
 
     async def _handle_create_lakehouse_shortcut(self, arguments: Dict[str, Any]) -> str:
         """Handle creation of lakehouse shortcut with approval elicitation"""
