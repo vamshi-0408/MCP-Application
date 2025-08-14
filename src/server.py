@@ -2,6 +2,7 @@ import asyncio
 from typing import Any, Dict, List, Optional, Union
 from mcp.server import Server, NotificationOptions
 from mcp.server.models import InitializationOptions
+from mcp.server.elicitation import AcceptedElicitation,DeclinedElicitation,CancelledElicitation
 from mcp.types import Tool, TextContent
 import mcp.server.stdio
 import os
@@ -21,12 +22,23 @@ import pyodbc
 import pandas as pd
 from datetime import datetime, timedelta
 import requests
+import anyio
 
-# Setup logging
+# Setup logging with UTF-8 encoding
+import io
+import codecs
+
+# Configure stdout and stderr for UTF-8 encoding
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    stream=sys.stderr
+    stream=sys.stderr,
+    encoding='utf-8',
+    errors='replace'
 )
 logger = logging.getLogger(__name__)
 
@@ -66,83 +78,83 @@ class AuthenticationManager:
             
             return self._access_token
 
-class SQLEndpointMetadata:
+class SQLEndpoint:
     """Handles SQL endpoint connections and queries with shared authentication."""
     
-    def __init__(self, auth_manager: AuthenticationManager):
-        self.auth_manager = auth_manager
+    def __init__(self):
+        self.auth_manager = AuthenticationManager()
         self.engine = None
         self.sql_endpoint = None
         self.sql_database = None
         self.driver = None
+        self.access_token = None
         self._connection_lock = threading.Lock()
     
-    def initialize_connection(self, sql_endpoint: str, sql_database: str):
+    def initialize_sql_connection(self, sql_endpoint: str, sql_database: str):
         """Initialize the SQL engine with authentication and drivers."""
         with self._connection_lock:
+            if not sql_endpoint or not sql_database:
+                raise ValueError("sql_endpoint and sql_database must be provided")
+
             self.sql_endpoint = sql_endpoint
             self.sql_database = sql_database
-            
-            if not self.sql_endpoint or not self.sql_database:
-                raise ValueError("sql_endpoint and sql_database must be provided")
-            
+
             # Get available SQL Server drivers
             drivers = [d for d in pyodbc.drivers() if 'SQL Server' in d]
             if not drivers:
-                raise Exception("No SQL Server ODBC drivers found. Please install ODBC Driver for SQL Server.")
-            
-            # Use the first available driver (prefer newer versions)
-            self.driver = next((d for d in ['ODBC Driver 18 for SQL Server', 'ODBC Driver 17 for SQL Server'] if d in drivers), drivers[0])
+                raise RuntimeError("No SQL Server ODBC drivers found. Please install ODBC Driver for SQL Server.")
+
+            # Prefer newer drivers
+            preferred_drivers = ['ODBC Driver 18 for SQL Server', 'ODBC Driver 17 for SQL Server']
+            self.driver = next((d for d in preferred_drivers if d in drivers), drivers[0])
             logger.info(f"Using driver: {self.driver}")
-            
-            # Create SQL engine with access token authentication
-            self.engine = sqlalchemy.create_engine(
-                "mssql+pyodbc://", 
-                creator=self._create_connection
+
+            if not self.access_token:
+               self.access_token = self.auth_manager.get_access_token(force_refresh=True)
+
+            # Prepare access token
+            token_bytes = self.access_token.encode("utf-16-le")
+            token_struct = struct.pack(f'<I{len(token_bytes)}s', len(token_bytes), token_bytes)
+            SQL_COPT_SS_ACCESS_TOKEN = 1256
+
+            # Build connection string
+            connection_string = (
+                f"Driver={{{self.driver}}};"
+                f"Server={self.sql_endpoint},1433;"
+                f"Database={self.sql_database};"
+                f"Encrypt=Yes;"
+                f"TrustServerCertificate=No;"
             )
-            logger.info("SQL Engine initialized and authenticated successfully")
-            return self
+
+            self.engine = sqlalchemy.create_engine(
+                "mssql+pyodbc://",
+                creator=lambda: pyodbc.connect(
+                    connection_string,
+                    attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct}
+                )
+            )
+            return self.engine
     
-    def _create_connection(self):
-        """Create a database connection with fresh access token."""
-        # Get fresh access token for each connection
-        access_token = self.auth_manager.get_access_token()
-        token = access_token.encode("UTF-16-LE")
-        token_struct = struct.pack(f'<I{len(token)}s', len(token), token)
-        SQL_COPT_SS_ACCESS_TOKEN = 1256
-        
-        # Build connection string with stored driver and endpoint info
-        connection_string = f"Driver={{{self.driver}}};Server={self.sql_endpoint},1433;Database={self.sql_database};Encrypt=Yes;TrustServerCertificate=No"
-        
-        return pyodbc.connect(
-            connection_string, 
-            attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct}
-        )
-    
-    def get_access_token(self) -> str:
-        """Get the access token for the connected model to use in API calls."""
-        return self.auth_manager.get_access_token()
-    
-    def get_lakehouse_tables_from_sql(self) -> pd.DataFrame:
-        """Get lakehouse tables using the pre-authenticated SQL engine."""
+    def get_sql_tables(self) -> pd.DataFrame:
+        """Get SQL tables using the pre-authenticated SQL engine."""
         if not self.engine:
-            raise Exception("Connection not initialized. Call initialize_connection() first.")
+            raise Exception("Please provide SQL Endpoint Server and Database details.")
         
         df = pd.read_sql_query("SELECT name as table_name FROM sys.tables", self.engine)
-        logger.info(f"Retrieved {len(df)} tables from lakehouse")
+        logger.info(f"Retrieved {len(df)} tables from SQL database")
         return df
     
     def execute_sql_query(self, query: str) -> pd.DataFrame:
         """Execute any SQL query using the pre-authenticated SQL engine."""
         if not self.engine:
-            raise Exception("Connection not initialized for sql server. please provide the sqlendpoint and database details")
-        
+            raise Exception("Please provide SQL Endpoint Server and Database details.")
+
         logger.info(f"Executing SQL query: {query[:100]}...")  # Log first 100 chars
         df = pd.read_sql_query(query, self.engine)
         logger.info(f"Query executed successfully, returned {len(df)} rows")
         return df
     
-    def get_table_schema(self, table_name: str) -> pd.DataFrame:
+    def get_sql_table_schema(self, table_name: str) -> pd.DataFrame:
         """Get column information for a specific table."""
         query = f"""
         SELECT 
@@ -153,343 +165,818 @@ class SQLEndpointMetadata:
         ORDER BY ORDINAL_POSITION
         """
         return self.execute_sql_query(query)
-class FabricAPIManager:
+
+class Fabric:
     """Handles Microsoft Fabric REST API operations with centralized authentication."""
+    def __init__(self):
+        self.auth_manager = AuthenticationManager()
+        self.access_token = self.auth_manager.get_access_token()
     
-    def __init__(self, auth_manager: AuthenticationManager):
-        self.auth_manager = auth_manager
-        self.base_url = "https://api.fabric.microsoft.com/v1"
-        self._session = requests.Session()
-        self._session.timeout = 30
-    
-    def get_fabric_access_token(self) -> str:
-        """Get access token specifically for Fabric API operations."""
-        # Use the existing auth manager but with Fabric-specific scope
-        with self.auth_manager._lock:
-            # For Fabric API, we need the powerbi scope
-            token_result = self.auth_manager._credential.get_token(
-                "https://analysis.windows.net/powerbi/api/.default"
-            )
-            return token_result.token
-    
-    def _make_api_request(self, method: str, endpoint: str, data: Optional[Dict] = None, 
-                         use_default_credential: bool = True, access_token: str = "") -> requests.Response:
-        """Make authenticated API request to Fabric REST API."""
-        
-        # Get access token
-        if use_default_credential:
-            token = self.get_fabric_access_token()
-            auth_method = "DefaultAzureCredential"
-        else:
-            if not access_token:
-                raise Exception("Access token is required when use_default_credential is False")
-            token = access_token
-            auth_method = "Manual access token"
-        
-        # Prepare headers
+    def get_workspace_info(self, workspace_identifier: str) -> Dict[str, Any]:
+        if not self.access_token:
+            self.access_token = self.auth_manager.get_access_token(force_refresh=True)
+        info = None
         headers = {
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json"
         }
-        
-        # Full URL
-        url = f"{self.base_url}/{endpoint.lstrip('/')}"
-        
-        logger.info(f"Making {method} request to {url} using {auth_method}")
-        
-        # Make request
-        response = self._session.request(method, url, headers=headers, json=data)
-        return response
+
+        # Try to fetch by ID first
+        url_by_id = f"https://api.fabric.microsoft.com/v1/workspaces/{workspace_identifier}"
+        response = requests.get(url_by_id, headers=headers)
+
+        if response.status_code == 200:
+            data = response.json()
+            info = {
+                "workspace_id": data.get("id"),
+                "workspace_name": data.get("displayName")
+            }
+
+        # If not found by ID, try searching by name
+        url_list = f"https://api.fabric.microsoft.com/v1/workspaces/"
+        response = requests.get(url_list, headers=headers)
+
+        if response.status_code == 200:
+            workspaces = response.json().get("value", [])
+            for ws in workspaces:
+                if ws.get("displayName", "").lower() == workspace_identifier.lower():
+                    info = {
+                        "workspace_id": ws.get("id"),
+                        "workspace_name": ws.get("displayName")
+                    }
+
+        if not info:
+            raise ValueError(f"Workspace '{workspace_identifier}' not found by ID or name.")
+        return info
     
-    def create_lakehouse_via_api(self, workspace_id: str, lakehouse_name: str, 
-                                description: str = "", use_default_credential: bool = True, 
-                                access_token: str = "") -> Dict[str, Any]:
-        """Create a new lakehouse using Fabric REST API with Azure credential or access token authentication"""
+    def get_lakehouse_info(self, workspace_identifier: str, lakehouse_identifier: str) -> Dict[str, Any]:
+        if not self.access_token:
+            self.access_token = self.auth_manager.get_access_token(force_refresh=True)
+        info = None
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json"
+        }
+        workspace_info = self.get_workspace_info(workspace_identifier)
+        workspace_id = workspace_info.get("workspace_id", None)
+        workspace_name = workspace_info.get("workspace_name", None)
+
+        if not workspace_id:
+            raise ValueError(f"Workspace '{workspace_identifier}' not found.")
+        url_by_id = f"https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/lakehouses/{lakehouse_identifier}"
+        response = requests.get(url_by_id, headers=headers)
+
+        if response.status_code == 200:
+            data = response.json()
+            info = {
+                "workspace_id": workspace_id,
+                "workspace_name": workspace_name,
+                "lakehouse_id": data.get("id"),
+                "lakehouse_name": data.get("displayName"),
+                "sql_endpoint": data.get("properties",{}).get("sqlEndpointProperties",{}).get("connectionString",""),
+                "sql_database":data.get("properties",{}).get("sqlEndpointProperties",{}).get("id","")
+            }
+        
+        url_list = f"https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/lakehouses"
+        response = requests.get(url_list, headers=headers)
+
+        if response.status_code == 200:
+            lakehouses = response.json().get("value", [])
+            for lh in lakehouses:
+                if lh.get("displayName", "").lower() == lakehouse_identifier.lower():
+                    info = {
+                        "workspace_id": workspace_id,
+                        "workspace_name": workspace_name,
+                        "lakehouse_id": lh.get("id"),
+                        "lakehouse_name": lh.get("displayName"),
+                        "sql_endpoint": lh.get("properties",{}).get("sqlEndpointProperties",{}).get("connectionString",""),
+                        "sql_database":lh.get("properties",{}).get("sqlEndpointProperties",{}).get("id","")
+                    }
+
+        if not info:
+            raise ValueError(f"Lakehouse '{lakehouse_identifier}' not found by ID or name.")
+
+        return info
+    
+    def create_lakehouse(self, workspace_identifier: str, lakehouse_name: str, description: str = None) -> Dict[str, Any]:
+        """Create a new lakehouse using Fabric REST API"""
         try:
-            endpoint = f"workspaces/{workspace_id}/lakehouses"
+            if not self.access_token:
+               self.access_token = self.auth_manager.get_access_token(force_refresh=True)
             
-            # Request body
+            workspace_id=self.get_workspace_info(workspace_identifier).get("workspace_id",None)
+            if not workspace_id:
+                raise ValueError(f"Workspace '{workspace_identifier}' not found.")
+            
+            endpoint = f"https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/lakehouses"
+            
             body = {
                 "displayName": lakehouse_name,
-                "description": description if description else f"Lakehouse created via MCP API - {lakehouse_name}"
+                "description": description
             }
-            
-            logger.info(f"Creating lakehouse '{lakehouse_name}' in workspace '{workspace_id}'")
-            
-            # Make the API call
-            response = self._make_api_request("POST", endpoint, body, use_default_credential, access_token)
-            
-            if response.status_code == 201:
-                lakehouse_data = response.json()
-                logger.info(f"✅ Lakehouse '{lakehouse_name}' created successfully")
-                logger.info(f"Lakehouse ID: {lakehouse_data.get('id', 'N/A')}")
-                return {
-                    "success": True,
-                    "message": f"Lakehouse '{lakehouse_name}' created successfully",
-                    "lakehouse_id": lakehouse_data.get('id'),
-                    "lakehouse_name": lakehouse_data.get('displayName'),
-                    "workspace_id": workspace_id,
-                    "description": lakehouse_data.get('description'),
-                    "created_date": lakehouse_data.get('createdDate'),
-                    "modified_date": lakehouse_data.get('modifiedDate'),
-                    "auth_method": "DefaultAzureCredential" if use_default_credential else "Manual access token"
-                }
-            else:
-                error_msg = f"Failed to create lakehouse. Status: {response.status_code}"
-                try:
-                    error_detail = response.json()
-                    error_msg += f", Error: {error_detail}"
-                except:
-                    error_msg += f", Response: {response.text}"
-                
-                logger.error(error_msg)
-                return {
-                    "success": False,
-                    "message": error_msg,
-                    "status_code": response.status_code,
-                    "response": response.text,
-                    "auth_method": "DefaultAzureCredential" if use_default_credential else "Manual access token"
-                }
-                
-        except requests.exceptions.RequestException as e:
-            error_msg = f"Network error while creating lakehouse: {str(e)}"
-            logger.error(error_msg)
-            return {
-                "success": False,
-                "message": error_msg,
-                "error_type": "NetworkError"
-            }
-        except Exception as e:
-            error_msg = f"Unexpected error while creating lakehouse: {str(e)}"
-            logger.error(error_msg)
-            return {
-                "success": False,
-                "message": error_msg,
-                "error_type": "UnexpectedError"
-            }
-    def create_shortcut_simple(
-        self,
-        workspace_id: str,
-        lakehouse_id: str,
-        shortcut_name: str,
-        target_workspace_id: str,
-        target_lakehouse_id: str,
-        target_path: str = "Tables/delete_test1",
-        use_default_credential: bool = True,
-        access_token: str = "" 
-    ) -> dict:
-        """
-        Simplified shortcut creation method with direct lakehouse IDs.
-        
-        Args:
-            workspace_id: The workspace ID where the lakehouse is located
-            lakehouse_id: The destination lakehouse ID
-            shortcut_name: Name for the new shortcut
-            target_workspace_id: Source workspace ID
-            target_lakehouse_id: Source lakehouse ID
-            target_path: Path in the source lakehouse (default: "Tables/delete_test1")
-            use_default_credential: Whether to use DefaultAzureCredential
-            access_token: Manual access token (if use_default_credential=False)
-        """
-        try:
-            if use_default_credential:
-                token = self.get_fabric_access_token()
-            else:
-                if not access_token:
-                    raise ValueError("Access token must be provided if not using default credential.")
-                token = access_token
-
-            url = f"https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/items/{lakehouse_id}/shortcuts?shortcutConflictPolicy=Abort"
 
             headers = {
-                "Authorization": f"Bearer {token}",
+                "Authorization": f"Bearer {self.access_token}",
                 "Content-Type": "application/json"
             }
 
+            response = requests.post(endpoint, headers=headers, json=body)
+            return response.text
+        
+        except Exception as e:
+            return f"{str(e)}"
+
+    async def create_lakehouse_shortcut(self, target_workspace: str = None, target_lakehouse: str = None, target_shortcut_path: str = None, target_shortcut_name: str = None, source_workspace: str = None, source_lakehouse: str = None, source_path: str = None, approved: bool = False) -> dict:
+        """Creating shortcuts from authoritative workspace and lakehouse into target workspace, target lakehouse and target path with MCP elicitation for approval."""
+        try:
+            # If no parameters provided, return elicitation prompt to collect all details
+            if not all([target_workspace, target_lakehouse, target_shortcut_path, target_shortcut_name, source_workspace, source_lakehouse, source_path]):
+                approval_prompt = """
+Create Lakehouse Shortcut
+
+Please provide the following information for creating the lakehouse shortcut:
+
+1. Target Workspace: Name or ID of the target workspace
+2. Target Lakehouse: Name or ID of the target lakehouse  
+3. Target Shortcut Path: Path in target lakehouse (e.g., 'Tables' or 'Files/folder')
+4. Target Shortcut Name: Name for the shortcut
+5. Source Workspace: Name or ID of the source workspace
+6. Source Lakehouse: Name or ID of the source lakehouse
+7. Source Path: Path in source lakehouse (e.g., 'Tables/table_name' or 'Files/folder')
+
+After providing these details, you will be asked for final approval before creating the shortcut.
+                """
+
+                return {
+                    "type": "elicitation_required",
+                    "prompt": approval_prompt.strip(),
+                    "properties": {
+                        "target_workspace": {"type": "string", "description": "Name or ID of the target workspace"},
+                        "target_lakehouse": {"type": "string", "description": "Name or ID of the target lakehouse"},
+                        "target_shortcut_path": {"type": "string", "description": "Path in target lakehouse (e.g., 'Tables' or 'Files/folder')"},
+                        "target_shortcut_name": {"type": "string", "description": "Name for the shortcut"},
+                        "source_workspace": {"type": "string", "description": "Name or ID of the source workspace"},
+                        "source_lakehouse": {"type": "string", "description": "Name or ID of the source lakehouse"},
+                        "source_path": {"type": "string", "description": "Path in source lakehouse (e.g., 'Tables/table_name' or 'Files/folder')"}
+                    },
+                    "required_properties": ["target_workspace", "target_lakehouse", "target_shortcut_path", "target_shortcut_name", "source_workspace", "source_lakehouse", "source_path"]
+                }
+
+            # Validate paths
+            if target_shortcut_path.lower() == "tables":
+                pass
+            elif target_shortcut_path.lower().startswith("files/"):
+                pass
+            else:
+                raise ValueError("Invalid target shortcut path. It should be either 'Tables' or start with 'Files'.")
+            
+            if source_path.lower().startswith("tables/"):
+                pass
+            elif source_path.lower().startswith("files/"):
+                pass
+            else:
+                raise ValueError("Invalid source path. It should start with 'Tables/' or start with 'Files/'.")
+
+            # Get workspace and lakehouse information
+            target_lakehouse_info = self.get_lakehouse_info(target_workspace, target_lakehouse)
+            target_lakehouse_id = target_lakehouse_info.get("lakehouse_id")
+            target_lakehouse_name = target_lakehouse_info.get("lakehouse_name")
+            target_workspace_id = target_lakehouse_info.get("workspace_id")
+            target_workspace_name = target_lakehouse_info.get("workspace_name")
+            
+            source_lakehouse_info = self.get_lakehouse_info(source_workspace, source_lakehouse)
+            source_lakehouse_id = source_lakehouse_info.get("lakehouse_id")
+            source_lakehouse_name = source_lakehouse_info.get("lakehouse_name")
+            source_workspace_id = source_lakehouse_info.get("workspace_id")
+            source_workspace_name = source_lakehouse_info.get("workspace_name")
+
+            # Prepare request body
             request_body = {
-                "path": "Tables",
-                "name": shortcut_name,
+                "path": target_shortcut_path,
+                "name": target_shortcut_name,
                 "target": {
                     "oneLake": {
-                        "workspaceId": target_workspace_id,
-                        "itemId": target_lakehouse_id,
-                        "path": target_path
+                        "workspaceId": source_workspace_id,
+                        "itemId": source_lakehouse_id,
+                        "path": source_path
                     }
                 }
             }
 
-            logger.info(f"Creating shortcut '{shortcut_name}' in lakehouse '{lakehouse_id}' (workspace: {workspace_id})")
+            # If not approved, return elicitation prompt for approval
+            if not approved:
+                approval_prompt = f"""
+Create Lakehouse Shortcut - Final Approval Required
+
+Review the following shortcut details:
+
+Source:
+- Workspace: {source_workspace_name} (ID: {source_workspace_id})
+- Lakehouse: {source_lakehouse_name} (ID: {source_lakehouse_id})
+- Path: {source_path}
+
+Target:
+- Workspace: {target_workspace_name} (ID: {target_workspace_id})
+- Lakehouse: {target_lakehouse_name} (ID: {target_lakehouse_id})
+- Shortcut Path: {target_shortcut_path}
+- Shortcut Name: {target_shortcut_name}
+
+This operation will create a shortcut linking the source data to the target location.
+Do you approve creating this shortcut?
+
+Reply with 'yes' to approve or 'no' to cancel.
+                """
+
+                return {
+                    "type": "elicitation_required",
+                    "prompt": approval_prompt.strip(),
+                    "request_body": request_body,
+                    "target_workspace_id": target_workspace_id,
+                    "target_lakehouse_id": target_lakehouse_id,
+                    "properties": {
+                        "target_workspace": {"type": "string", "description": "Name or ID of the target workspace"},
+                        "target_lakehouse": {"type": "string", "description": "Name or ID of the target lakehouse"},
+                        "target_shortcut_path": {"type": "string", "description": "Path in target lakehouse (e.g., 'Tables' or 'Files/folder')"},
+                        "target_shortcut_name": {"type": "string", "description": "Name for the shortcut"},
+                        "source_workspace": {"type": "string", "description": "Name or ID of the source workspace"},
+                        "source_lakehouse": {"type": "string", "description": "Name or ID of the source lakehouse"},
+                        "source_path": {"type": "string", "description": "Path in source lakehouse (e.g., 'Tables/table_name' or 'Files/folder')"},
+                        "approved": {"type": "boolean", "description": "Final approval confirmation", "default": False}
+                    },
+                    "required_properties": ["target_workspace", "target_lakehouse", "target_shortcut_path", "target_shortcut_name", "source_workspace", "source_lakehouse", "source_path", "approved"],
+                    "source_info": {
+                        "workspace": source_workspace_name,
+                        "lakehouse": source_lakehouse_name,
+                        "path": source_path
+                    },
+                    "target_info": {
+                        "workspace": target_workspace_name,
+                        "lakehouse": target_lakehouse_name,
+                        "shortcut_path": target_shortcut_path,
+                        "shortcut_name": target_shortcut_name
+                    }
+                }
+
+            # If approved, proceed with shortcut creation
+            if not self.access_token:
+                self.access_token = self.auth_manager.get_access_token(force_refresh=True)
+
+            url = f"https://api.fabric.microsoft.com/v1/workspaces/{target_workspace_id}/items/{target_lakehouse_id}/shortcuts?shortcutConflictPolicy=Abort"
+
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json"
+            }
+
             response = requests.post(url, headers=headers, json=request_body, timeout=30)
 
             if response.status_code == 201:
-                logger.info("✅ Shortcut created successfully.")
-                return {"success": True, "message": "Shortcut created", "response": response.json()}
-            else:
-                logger.error(f"❌ Failed to create shortcut: {response.status_code} - {response.text}")
                 return {
-                    "success": False,
-                    "status_code": response.status_code,
-                    "message": response.text,
-                    "response": response.json() if response.headers.get("content-type") == "application/json" else {}
-                }
-
-        except Exception as e:
-            logger.error(f"Unexpected error: {str(e)}")
-            return {"success": False, "message": str(e), "error_type": "UnexpectedError"}
-
-    def create_semantic_model_via_api(self, workspace_id: str, semantic_model_name: str, 
-                                    description: str = "", use_default_credential: bool = True, 
-                                    access_token: str = "") -> Dict[str, Any]:
-        """Create a new semantic model using Power BI REST API with a simple dummy table"""
-        try:
-            # Get access token using the same method as the working code
-            if use_default_credential:
-                credential = DefaultAzureCredential()
-                token = credential.get_token("https://analysis.windows.net/powerbi/api/.default").token
-                auth_method = "DefaultAzureCredential"
-            else:
-                if not access_token:
-                    raise Exception("Access token is required when use_default_credential is False")
-                token = access_token
-                auth_method = "Manual access token"
-            
-            # Use Power BI REST API endpoint instead of Fabric API
-            url = f'https://api.powerbi.com/v1.0/myorg/groups/{workspace_id}/datasets'
-            
-            headers = {
-                'Authorization': f'Bearer {token}',
-                'Content-Type': 'application/json'
-            }
-            
-            # Create a simple dataset definition with a dummy table
-            # This follows the Power BI API structure for creating datasets
-            payload = {
-                "name": semantic_model_name,
-                "tables": [
-                    {
-                        "name": "DummyTable",
-                        "columns": [
-                            {
-                                "name": "ID",
-                                "dataType": "Int64"
-                            },
-                            {
-                                "name": "Name", 
-                                "dataType": "String"
-                            },
-                            {
-                                "name": "Value",
-                                "dataType": "Double"
-                            },
-                            {
-                                "name": "Date",
-                                "dataType": "DateTime"
-                            }
-                        ]
+                    "success": "Shortcut created successfully", 
+                    "response": response.json(),
+                    "shortcut_details": {
+                        "source": f"{source_workspace_name}/{source_lakehouse_name}/{source_path}",
+                        "target": f"{target_workspace_name}/{target_lakehouse_name}/{target_shortcut_path}/{target_shortcut_name}"
                     }
-                ]
-            }
-            
-            logger.info(f"Creating semantic model '{semantic_model_name}' in workspace '{workspace_id}' using Power BI API")
-            
-            # Make the API call using requests directly
-            response = requests.post(url, headers=headers, json=payload, timeout=30)
-            
-            if response.status_code in [200, 201, 202]:
-                semantic_model_data = response.json()
-                logger.info(f"✅ Semantic model '{semantic_model_name}' created successfully")
-                logger.info(f"Semantic Model ID: {semantic_model_data.get('id', 'N/A')}")
-                return {
-                    "success": True,
-                    "message": f"Semantic model '{semantic_model_name}' created successfully with dummy table",
-                    "semantic_model_id": semantic_model_data.get('id'),
-                    "semantic_model_name": semantic_model_data.get('name'),
-                    "workspace_id": workspace_id,
-                    "dummy_table": "DummyTable with columns: ID, Name, Value, Date",
-                    "auth_method": auth_method,
-                    "api_endpoint": "Power BI REST API"
                 }
             else:
-                error_msg = f"Failed to create semantic model. Status: {response.status_code}"
-                try:
-                    error_detail = response.json()
-                    error_msg += f", Error: {error_detail}"
-                except:
-                    error_msg += f", Response: {response.text}"
-                
-                logger.error(error_msg)
-                return {
-                    "success": False,
-                    "message": error_msg,
-                    "status_code": response.status_code,
-                    "response": response.text,
-                    "auth_method": auth_method,
-                    "api_endpoint": "Power BI REST API"
-                }
-                
-        except requests.exceptions.RequestException as e:
-            error_msg = f"Network error while creating semantic model: {str(e)}"
-            logger.error(error_msg)
-            return {
-                "success": False,
-                "message": error_msg,
-                "error_type": "NetworkError"
-            }
-        except Exception as e:
-            error_msg = f"Unexpected error while creating semantic model: {str(e)}"
-            logger.error(error_msg)
-            return {
-                "success": False,
-                "message": error_msg,
-                "error_type": "UnexpectedError"
-            }
+                return {"error": f"Failed to create shortcut: {response.status_code} - {response.text}"}
 
-class TabularEditorConnector:
-    """Handles Power BI tabular model connections and operations."""
-    
-    def __init__(self, auth_manager: AuthenticationManager, sql_metadata: SQLEndpointMetadata):
-        self.auth_manager = auth_manager
-        self.sql_metadata = sql_metadata
+        except Exception as e:
+            return {"error": str(e)}
+
+class TabularEditor:
+    def __init__(self):
         self.connection_string = None
         self.connected = False
+        self.executor = ThreadPoolExecutor(max_workers=4)
         self.model = None
+        self.connection_lock = threading.Lock()
         self.tabularserver = TabularServer()
-        self._connection_lock = threading.Lock()
+        self.fabric = Fabric()
+        self.sql_metadata = SQLEndpoint()   
 
-    def connect(self, server_name: str, database_name: str) -> bool:
-        """Connect to the powerbi server and database using the server_name and database_name parameters."""
-        with self._connection_lock:
-            try:
-                self.connection_string = (
-                    f"Provider=MSOLAP;"
-                    f"Data Source={server_name};"
-                    f"Initial Catalog={database_name};"
-                    f"User ID={os.getenv('USER_ID')};"
-                    f"Password={os.getenv('PASSWORD')};"
-                )
-                self.tabularserver.Connect(self.connection_string)
-                self.model = self.tabularserver.Databases.FindByName(database_name).Model 
-                self.connected = True
-                logger.info(f"✅ Connected to model '{database_name}'")
-                return True
-            except Exception as e:
-                logger.error(f"Connection failed: {str(e)}")
-                raise
+    def connect_dataset(self, workspace_identifier: str, database_name: str) -> bool:
+        """Establish connection to Power BI dataset"""
+        try: 
+            workspace_name = self.fabric.get_workspace_info(workspace_identifier).get("workspace_name", None)
+            if not workspace_name:
+                raise ValueError(f"Workspace '{workspace_identifier}' not found.")
+            self.connection_string = (
+            f"Provider=MSOLAP;"
+            f"Data Source=powerbi://api.powerbi.com/v1.0/myorg/{workspace_name};"
+            f"Initial Catalog={database_name};"
+            f"User ID={os.getenv('User_ID')};"
+            f"Password={os.getenv('Password')};"
+            )
+            self.tabularserver.Connect(self.connection_string)
+            isexists = False
+            for database in self.tabularserver.Databases:
+                if database.Name == database_name:
+                     db = database
+                     isexists = True
+                     break
+            if not isexists:
+                raise f"{database_name} not found in the provided server."
 
-    def disconnect(self):
-        """Disconnect from the powerbi server."""
-        with self._connection_lock:
-            if self.connected:
-                self.tabularserver.Disconnect()
-                self.connected = False
-                logger.info("Disconnected from server.")
-            return "Disconnected successfully."
+            self.model = db.Model
+            self.connected = True
+            logger.info(f"✅ Connected to model '{db.Name}'.")
+        except Exception as e:
+            logger.error(f"Connection failed: {str(e)}")
+            raise Exception(f"Connection failed: {str(e).encode('ascii', 'replace').decode('ascii')}")
 
+    def disconnect_dataset(self):
+        self.tabularserver.Disconnect()
+        logger.info("Disconnected from server.")
+        return "Disconnected from server is successfull"
+    
     def list_tables(self) -> List[str]:
         """List all tables in the connected model."""
         if not self.connected:
             raise Exception("Tabular server is not connected.")
         return [t.Name for t in self.model.Tables]
+
+    def get_multiple_sql_tables_schema(self, table_names: List[str]) -> Dict[str, List[Dict[str, str]]]:
+        """Helper function to get schema information for multiple sql tables."""
+        tables_schema = {}
+        for table_name in table_names:
+            try:
+                schema_df = self.sql_metadata.get_sql_table_schema(table_name)
+                tables_schema[table_name] = [
+                    {
+                        "column_name": row["column_name"],
+                        "data_type": row["data_type"]
+                    }
+                    for _, row in schema_df.iterrows()
+                ]
+                logger.info(f"Retrieved schema for table: {table_name} with {len(tables_schema[table_name])} columns")
+            except Exception as e:
+                error_msg = str(e).encode('ascii', 'replace').decode('ascii')
+                logger.error(f"Error retrieving schema for table {table_name}: {error_msg}")
+                tables_schema[table_name] = []
+        return tables_schema
+    
+    def generate_tmsl_columns(self, columns_schema: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        """Helper function to generate TMSL column definitions from schema information."""
+        tmsl_columns = []
+        
+        # SQL to Analysis Services data type mapping
+        type_mapping = {
+            'bigint': 'int64',
+            'int': 'int64',
+            'smallint': 'int64',
+            'tinyint': 'int64',
+            'bit': 'boolean',
+            'decimal': 'decimal',
+            'numeric': 'decimal',
+            'money': 'decimal',
+            'smallmoney': 'decimal',
+            'float': 'double',
+            'real': 'double',
+            'datetime': 'dateTime',
+            'datetime2': 'dateTime',
+            'smalldatetime': 'dateTime',
+            'date': 'dateTime',
+            'time': 'dateTime',
+            'datetimeoffset': 'dateTime',
+            'char': 'string',
+            'varchar': 'string',
+            'text': 'string',
+            'nchar': 'string',
+            'nvarchar': 'string',
+            'ntext': 'string',
+            'binary': 'binary',
+            'varbinary': 'binary',
+            'image': 'binary',
+            'uniqueidentifier': 'string'
+        }
+        
+        for column in columns_schema:
+            column_name = column['column_name']
+            sql_data_type = column['data_type'].lower()
+            
+            # Map SQL data type to Analysis Services data type
+            as_data_type = type_mapping.get(sql_data_type, 'string')
+            
+            column_def = {
+                "name": column_name,
+                "dataType": as_data_type,
+                "sourceColumn": column_name
+            }
+            
+            tmsl_columns.append(column_def)
+        
+        return tmsl_columns
+    
+    def select_tables_with_schema(self, selected_table_names: List[str] = None) -> Dict[str, Any]:
+        """Select specific tables and return their schemas, or return all tables if none specified."""
+        available_tables_df = self.sql_metadata.get_sql_tables()
+        available_tables = available_tables_df['table_name'].tolist()
+        
+        if selected_table_names:
+            # Validate that all selected tables exist
+            invalid_tables = [table for table in selected_table_names if table not in available_tables]
+            if invalid_tables:
+                raise ValueError(f"The following tables do not exist: {invalid_tables}")
+            tables_to_process = selected_table_names
+        else:
+            tables_to_process = available_tables
+        
+        logger.info(f"Processing {len(tables_to_process)} tables: {tables_to_process}")
+        tables_with_schema = self.get_multiple_sql_tables_schema(tables_to_process)
+        
+        return {
+            "available_tables": available_tables,
+            "selected_tables": tables_to_process,
+            "tables_schema": tables_with_schema
+        }
+    
+    def create_semantic_model(self, workspace_identifier: str, lakehouse_identifier:str ,semantic_model_name: str, selected_tables: List[str] = None, description: str = None) -> Dict[str, Any]:
+        """Create a comprehensive DirectLake semantic model using TMSL for full DAX Studio and XMLA support with automatic refresh"""
+        
+        # IMMEDIATE TEST - This should appear in logs if our code is running
+        print("🔥🔥🔥 VAMSHI CODE IS EXECUTING 🔥🔥🔥")
+        logger.error("🔥🔥🔥 VAMSHI CODE IS EXECUTING 🔥🔥🔥")
+        
+        try:
+            # Debug: Log input parameters
+            debug_start = {
+                "workspace_identifier": workspace_identifier,
+                "lakehouse_identifier": lakehouse_identifier,
+                "semantic_model_name": semantic_model_name,
+                "selected_tables": selected_tables,
+                "description": description
+            }
+            print("="*80)
+            print("🚀 SEMANTIC MODEL CREATION - STEP BY STEP")
+            print("="*80)
+            print(f"📋 Parameters: workspace={workspace_identifier}, lakehouse={lakehouse_identifier}, model={semantic_model_name}, tables={selected_tables}")
+            
+            print("📍 STEP 1: Getting lakehouse info...")
+            logger.info("="*80)
+            logger.info("🚀 SEMANTIC MODEL CREATION - STEP BY STEP")
+            logger.info("="*80)
+            logger.info(f"📋 Parameters: workspace={workspace_identifier}, lakehouse={lakehouse_identifier}, model={semantic_model_name}, tables={selected_tables}")
+            
+            logger.info("📍 STEP 1: Getting lakehouse info...")
+            try:
+                lakehouse_info = self.fabric.get_lakehouse_info(workspace_identifier,lakehouse_identifier)
+                print(f"✅ STEP 1 SUCCESS: {lakehouse_info}")
+                logger.info(f"✅ STEP 1 SUCCESS: {lakehouse_info}")
+            except Exception as e:
+                print(f"❌ STEP 1 FAILED: {str(e)}")
+                logger.error(f"❌ STEP 1 FAILED: {str(e)}")
+                return {"success": False, "error": f"Step 1 failed - lakehouse info: {str(e)}", "debug_start": debug_start}
+                
+            logger.info("Step 2: Extracting lakehouse properties...")
+            try:
+                workspace_name = lakehouse_info.get("workspace_name") if lakehouse_info else None
+                workspace_id = lakehouse_info.get("workspace_id") if lakehouse_info else None
+                lakehouse_name = lakehouse_info.get("lakehouse_name") if lakehouse_info else None
+                lakehouse_sql_endpoint = lakehouse_info.get("sql_endpoint") if lakehouse_info else None
+                lakehouse_database = lakehouse_info.get("sql_database") if lakehouse_info else None
+                logger.info(f"Extracted: workspace_name={workspace_name}, lakehouse_name={lakehouse_name}")
+            except Exception as e:
+                logger.error(f"Step 2 failed: {str(e)}")
+                return {"success": False, "error": f"Failed to extract lakehouse properties: {str(e)}", "lakehouse_info": lakehouse_info}
+            
+            logger.info(f"Lakehouse info retrieved: {lakehouse_info}")
+
+            if not lakehouse_sql_endpoint:
+                return {"success": False, "error": f"Lakehouse endpoint '{lakehouse_sql_endpoint}' not found."}
+
+            logger.info(f"Creating semantic model '{semantic_model_name}' in lakehouse '{lakehouse_name}'...")
+            logger.info(f"SQL Endpoint: '{lakehouse_sql_endpoint}'")
+            logger.info(f"SQL Database: '{lakehouse_database}'")
+
+            # Initialize SQL metadata if endpoint information is provided
+            tables_info = {}
+            
+            if lakehouse_sql_endpoint and lakehouse_database and lakehouse_sql_endpoint.strip() and lakehouse_database.strip():
+                logger.info("Step 3: Initializing SQL connection...")
+                try:
+                    self.sql_metadata.initialize_sql_connection(lakehouse_sql_endpoint, lakehouse_database)
+                    logger.info("SQL connection initialized successfully")
+                except Exception as e:
+                    logger.error(f"Step 3 failed: {str(e)}")
+                    return {"success": False, "error": f"Failed to initialize SQL connection: {str(e)}"}
+                
+                logger.info(f"Step 4: Getting table schema for selected_tables: {selected_tables}")
+                try:
+                    tables_info = self.select_tables_with_schema(selected_tables)
+                    logger.info(f"tables_info type: {type(tables_info)}, keys: {tables_info.keys() if tables_info else 'None'}")
+                except Exception as e:
+                    logger.error(f"Step 4 failed: {str(e)}")
+                    return {"success": False, "error": f"Failed to get table schema: {str(e)}"}
+                
+                if tables_info and 'selected_tables' in tables_info:
+                    logger.info(f"Retrieved schema for {len(tables_info['selected_tables'])} tables")
+                else:
+                    return {"success": False, "error": "Failed to retrieve table schema information", "tables_info": tables_info}
+            else:
+                return {"success": False, "error": "UNIQUE_ERROR_2025_v2: Please provide valid lakehouse SQL endpoint and database details.", "received_endpoint": lakehouse_sql_endpoint, "received_database": lakehouse_database}
+
+            # Connect to workspace via XMLA
+            xmla_connection = f"powerbi://api.powerbi.com/v1.0/myorg/{workspace_name}"
+            logger.info(f"Connecting to XMLA endpoint: {xmla_connection}")
+            connection_string = (
+                    f"Provider=MSOLAP;"
+                    f"Data Source={xmla_connection};"
+                    f"User ID={os.getenv('USER_ID')};"
+                    f"Password={os.getenv('PASSWORD')};"
+                )
+            
+            server = TabularServer()
+            server.Connect(connection_string)
+            logger.info("Successfully connected to Analysis Services")
+            
+            # Generate tables for TMSL command
+            logger.info("Step 5: Generating TMSL tables...")
+            tmsl_tables = []
+            logger.info(f"tables_info keys: {list(tables_info.keys()) if tables_info else 'None'}")
+            
+            if tables_info and 'tables_schema' in tables_info:
+                logger.info(f"Found tables_schema with {len(tables_info['tables_schema'])} tables")
+                for table_name, columns in tables_info['tables_schema'].items():
+                    logger.info(f"Processing table '{table_name}' with {len(columns) if columns else 0} columns")
+                    if columns:  # Only add tables that have columns
+                        try:
+                            tmsl_columns = self.generate_tmsl_columns(columns)
+                            logger.info(f"Generated {len(tmsl_columns)} TMSL columns for table '{table_name}'")
+                            
+                            table_def = {
+                                "name": table_name,
+                                "columns": tmsl_columns,
+                                "partitions": [
+                                    {
+                                        "name": f"{table_name}",
+                                        "mode": "directLake",
+                                        "source": {
+                                            "type": "entity",
+                                            "entityName": table_name,
+                                            "expressionSource": "DatabaseQuery"
+                                        }
+                                    }
+                                ]
+                            }
+                            tmsl_tables.append(table_def)
+                            logger.info(f"✅ Successfully added table '{table_name}' with {len(columns)} columns to model")
+                        except Exception as e:
+                            logger.error(f"❌ Failed to process table '{table_name}': {str(e)}")
+                    else:
+                        logger.warning(f"⚠️  Skipping table '{table_name}' - no columns found")
+            else:
+                logger.error("❌ No tables_schema found in tables_info")
+            
+            logger.info(f"Step 5 Complete: Generated {len(tmsl_tables)} tables for TMSL command")
+            
+            # Use proper TMSL Create command structure
+            logger.info("Step 6: Creating TMSL command structure...")
+            tmsl_create_command = {
+                "createOrReplace": {
+                    "object": {
+                        "database": semantic_model_name
+                    },
+                    "database": {
+                        "name": semantic_model_name,
+                        "compatibilityLevel": 1604,
+                        "model": {
+                            "culture": "en-US",
+                            "collation": "Latin1_General_100_BIN2_UTF8",
+                            "dataAccessOptions": {
+                                "legacyRedirects": True,
+                                "returnErrorValuesAsNull": True
+                            },
+                            "defaultPowerBIDataSourceVersion": "powerBI_V3",
+                            "sourceQueryCulture": "en-US",
+                            "directLakeBehavior": "directLakeOnly",
+                            "tables": tmsl_tables,  # This is where our tables go
+                            "cultures": [
+                                {
+                                    "name": "en-US",
+                                    "linguisticMetadata": {
+                                        "content": {
+                                            "Version": "1.0.0",
+                                            "Language": "en-US"
+                                        },
+                                        "contentType": "json"
+                                    }
+                                }
+                            ],
+                            "expressions": [
+                                {
+                                    "name": "DatabaseQuery",
+                                    "kind": "m",
+                                    "expression": f"let\n    database = Sql.Database(\"{lakehouse_sql_endpoint}\", \"{lakehouse_database}\")\nin\n    database" if lakehouse_sql_endpoint and lakehouse_database else "let\n    source = #\"Empty Table\"\nin\n    source",
+                                    "annotations": [
+                                        {
+                                            "name": "PBI_IncludeFutureArtifacts",
+                                            "value": "False"
+                                        }
+                                    ]
+                                }
+                            ],
+                            "annotations": [
+                                {
+                                    "name": "__PBI_TimeIntelligenceEnabled",
+                                    "value": "0"
+                                },
+                                {
+                                    "name": "PBIDesktopVersion",
+                                    "value": "2.147.7761.2 (Main)+4fed62a961b3b674388272b595c56068c5925805"
+                                },
+                                {
+                                    "name": "PBI_QueryOrder",
+                                    "value": "[\"DatabaseQuery\"]"
+                                },
+                                {
+                                    "name": "PBI_ProTooling",
+                                    "value": "[\"WebModelingEdit\"]"
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+            
+            logger.info(f"TMSL command created with {len(tmsl_tables)} tables in model structure")
+            logger.info("Step 6 Complete: TMSL command structure ready")
+            
+            logger.info("Executing TMSL command to create semantic model...")
+            # Execute the TMSL command
+            result = server.Execute(json.dumps(tmsl_create_command))
+            logger.info(f"TMSL execution result: {result}")
+                       # Wait a moment and try to verify the model was created
+            import time
+            time.sleep(10)  # Give model time to be available
+            server.Refresh()
+        
+            
+            # Check if our model exists and automatically refresh it
+            created_model = server.Databases.Find(semantic_model_name)
+            if created_model:
+                logger.info(f"Successfully verified model '{semantic_model_name}' was created")
+                
+                # Automatically refresh the model immediately after creation
+                if tmsl_tables:  # Only refresh if there are tables
+                    logger.info("Starting Automatic Refresh")
+                    try:
+                        created_model.Model.RequestRefresh(RefreshType.Full)
+                        created_model.Model.SaveChanges()
+                        logger.info("Model refreshed successfully immediately after creation")
+                        refresh_success = True
+                        refresh_message = "Model created and refreshed successfully"
+                    except Exception as refresh_error:
+                        refresh_error_msg = str(refresh_error).encode('ascii', 'replace').decode('ascii')
+                        logger.warning(f"Refresh failed: {refresh_error_msg}")
+                        refresh_success = False
+                        refresh_message = f"Model created but refresh failed: {str(refresh_error)}"
+                else:
+                    refresh_success = True
+                    refresh_message = "Model created successfully (no tables to refresh)"
+            else:
+                logger.warning(f"Model '{semantic_model_name}' not found immediately after creation")
+                refresh_success = False
+                refresh_message = "Model creation status unclear"
+            
+            server.Disconnect()
+            logger.info("Disconnected from Analysis Services")
+            
+            # Prepare the result
+            creation_result = {
+                "success": True, 
+                "message": refresh_message,
+                "workspace_id": workspace_id,
+                "workspace_name": workspace_name,
+                "model_name": semantic_model_name,
+                "tables_added": [table['name'] for table in tmsl_tables],
+                "total_tables": len(tmsl_tables),
+                "refresh_success": refresh_success
+            }
+            self.refresh_semantic_model(workspace_id, semantic_model_name)
+            return creation_result
+            
+        except Exception as e:
+            error_msg = str(e).encode('ascii', 'replace').decode('ascii')
+            logger.error(f"Error creating semantic model: {error_msg}")
+            return {"success": False, "error": error_msg}
+
+    def refresh_semantic_model(self, workspace_identifier: str, semantic_model_name: str, refresh_type: str = "Full") -> Dict[str, Any]:
+        """Refresh a semantic model with the specified parameters"""
+        try:
+            logger.info(f"🔄 Starting {refresh_type} refresh for '{semantic_model_name}'...")
+            if refresh_type == "Full":
+                refresh_type = RefreshType.Full
+                pass
+            else:
+                refresh_type = RefreshType.Automatic
+            # Connect to the dataset if not already connected
+            if not self.connected:
+                self.connect_dataset(workspace_identifier, semantic_model_name)
+            
+            # Perform the refresh operation
+            if self.model and self.connected:
+                # Request refresh on the model
+                self.model.RequestRefresh(refresh_type)
+                self.model.SaveChanges()
+                
+                print(f"✅ Refresh request submitted for '{semantic_model_name}'")
+                
+                
+                return {
+                    "success": True,
+                    "message": f"Successfully refreshed '{semantic_model_name}'",
+                    "refresh_type": str(refresh_type),
+                    "workspace": workspace_identifier,
+                    "model_name": semantic_model_name
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Model not connected. Please connect to the dataset first.",
+                    "connected": self.connected,
+                    "model_available": self.model is not None
+                }
+                
+        except Exception as e:
+            error_msg = str(e).encode('ascii', 'replace').decode('ascii')
+            logger.error(f"Refresh failed for '{semantic_model_name}': {error_msg}")
+            return {
+                "success": False,
+                "error": f"Refresh failed: {error_msg}",
+                "workspace": workspace_identifier,
+                "model_name": semantic_model_name
+            }
+    
+    def execute_dax_query(self, dax_query: str) -> List[Dict[str, Any]]:
+        """Execute a DAX query using AdomdClient"""
+        if not self.connection_string:
+            raise Exception("Not connected to Power BI.")
+        logger.info(f"Executing DAX query:\n{dax_query}")
+        results = []
+        try:
+            conn = AdomdConnection(self.connection_string)
+            conn.Open()
+            cmd = AdomdCommand(dax_query, conn)
+            reader = cmd.ExecuteReader()
+            columns = [reader.GetName(i) for i in range(reader.FieldCount)]
+            while reader.Read():
+                row = {columns[i]: reader.GetValue(i) for i in range(len(columns))}
+                results.append(row)
+            reader.Close()
+            conn.Close()
+            logger.info(f"Returned {len(results)} rows.")
+            return results
+        except Exception as e:
+            logger.error(f"DAX query execution failed: {str(e)}")
+            raise Exception(f"DAX query execution failed: {str(e)}")
+        
+    def create_measure(self, table_name: str, measure_name: str, dax_expression: str):
+        logger.info(f"Attempting to create measure '{measure_name}' in table '{table_name}' with DAX expression: {dax_expression}")
+        if not self.connected:
+            raise Exception("Tabular server is not connected")
+
+        # Find the table (case-insensitive)
+        table = next((t for t in self.model.Tables if t.Name.lower() == table_name.lower()), None)
+        if not table:
+            logger.error(f"Table '{table_name}' not found in the model.")
+            raise Exception(f"Table '{table_name}' not found in the model.")
+
+        # Check if the measure already exists (case-insensitive)
+        if any(m.Name.lower() == measure_name.lower() for m in table.Measures):
+            logger.error(f"Measure '{measure_name}' already exists in table '{table.Name}'.")
+            raise Exception(f"❌ Measure '{measure_name}' already exists in table '{table.Name}'.")
+
+        # Create and add the new measure
+        logger.info(f"Creating measure '{measure_name}' in table '{table.Name}'...")
+        try:
+            new_measure = table.AddMeasure(measure_name, dax_expression, "")
+            self.model.SaveChanges()
+            logger.info(f"✅ Measure '{measure_name}' created successfully in table '{table.Name}'")
+            return f"✅ Measure '{measure_name}' created successfully in table '{table.Name}'"
+        except Exception as e:
+            logger.error(f"❌ Failed to create measure '{measure_name}' in table '{table.Name}': {str(e)}")
+            raise Exception(f"❌ Failed to create measure '{measure_name}' in table '{table.Name}': {str(e)}")
+
+    def list_all_relationships(self) -> Dict[str, Any]:
+        """List all relationships and include the count."""
+        if not self.connected:
+            raise Exception("Tabular server is not connected")
+            
+        relationships = []
+        for rel in self.model.Relationships:
+            rel_id = getattr(rel, 'Name', None) or getattr(rel, 'ID', None)
+            relationships.append({
+                "from_table": rel.FromTable.Name,
+                "from_column": rel.FromColumn.Name,
+                "to_table": rel.ToTable.Name,
+                "to_column": rel.ToColumn.Name,
+                "relationship_id": rel_id
+            })
+        logger.info(f"Found {len(relationships)} relationships in total.")
+        return {"relationships": relationships, "count": len(relationships)}
+    
     def add_directlake_table(self, source_table: str, table_name: Optional[str] = None) -> str:
         """Add a DirectLake table to the model using SQL endpoint schema and auto-refresh."""
         if not self.connected:
@@ -612,91 +1099,6 @@ class TabularEditorConnector:
             logger.error(f"Failed to create DirectLake table '{table_name}': {e}")
             raise Exception(f"Failed to create DirectLake table '{table_name}': {e}")
     
-    def show_table_details_with_expressions(self, table_name: str) -> Dict[str, Any]:
-        """Get detailed information about a table including columns and measures with expressions."""
-        if not self.connected:
-            raise Exception("Tabular server is not connected")
-        
-        table = next((t for t in self.model.Tables if t.Name.lower() == table_name.lower()), None)
-        if not table:
-            raise Exception(f"Table '{table_name}' not found in the model.")
-        
-        columns_info = [
-            {
-                "name": col.Name,
-                "data_type": str(col.DataType)
-            }
-            for col in table.Columns
-        ]
-        
-        measures_info = [
-            {
-                "name": m.Name,
-                "expression": m.Expression,
-                "data_type": str(m.DataType)
-            }
-            for m in table.Measures
-        ]
-        
-        logger.info(f"Table: {table.Name}")
-        logger.info(f" Columns: {[col['name'] for col in columns_info]}")
-        logger.info(f" Measures: {[m['name'] for m in measures_info]}")
-        
-        return {
-            "table": table.Name,
-            "columns": columns_info,
-            "measures": measures_info
-        }
-    def hide_column(self, table_name: str, column_name: str) -> str:
-        if not self.connected:
-            raise Exception("Tabular server is not connected")
-        table = next((t for t in self.model.Tables if t.Name == table_name), None)
-        if not table:
-            raise Exception(f"Table '{table_name}' not found.")
-        column = next((c for c in table.Columns if c.Name == column_name), None)
-        if not column:
-            raise Exception(f"Column '{column_name}' not found in table '{table_name}'.")
-        column.IsHidden = True
-        self.model.SaveChanges()
-        logger.info(f"✅ Column '{column_name}' in table '{table_name}' hidden.")
-        return f"✅ Column '{column_name}' in table '{table_name}' is now hidden."
-
-    def hide_table(self, table_name: str) -> str:
-        if not self.connected:
-            raise Exception("Tabular server is not connected")
-        table = next((t for t in self.model.Tables if t.Name == table_name), None)
-        if not table:
-            raise Exception(f"Table '{table_name}' not found.")
-        table.IsHidden = True
-        self.model.SaveChanges()
-        logger.info(f"✅ Table '{table_name}' is now hidden.")
-        return f"✅ Table '{table_name}' is now hidden."
-
-    def unhide_column(self, table_name: str, column_name: str) -> str:
-        if not self.connected:
-            raise Exception("Tabular server is not connected")
-        table = next((t for t in self.model.Tables if t.Name == table_name), None)
-        if not table:
-            raise Exception(f"Table '{table_name}' not found.")
-        column = next((c for c in table.Columns if c.Name == column_name), None)
-        if not column:
-            raise Exception(f"Column '{column_name}' not found in table '{table_name}'.")
-        column.IsHidden = False
-        self.model.SaveChanges()
-        logger.info(f"✅ Column '{column_name}' in table '{table_name}' unhidden.")
-        return f"✅ Column '{column_name}' in table '{table_name}' is now visible."
-
-    def unhide_table(self, table_name: str) -> str:
-        if not self.connected:
-            raise Exception("Tabular server is not connected")
-        table = next((t for t in self.model.Tables if t.Name == table_name), None)
-        if not table:
-            raise Exception(f"Table '{table_name}' not found.")
-        table.IsHidden = False
-        self.model.SaveChanges()
-        logger.info(f"✅ Table '{table_name}' is now unhidden.")
-        return f"✅ Table '{table_name}' is now visible."
-    
     def update_column_names(self, table_name: str, old_col_name: str, new_col_name: str):
         if not self.connected: 
             logger.info("Tabular server is not connected")
@@ -751,6 +1153,7 @@ class TabularEditorConnector:
         except Exception as e: 
             msg = str(e)
         return msg
+    
     def update_table_name(self, old_table_name: str, new_table_name: str, confirm: bool = False) -> str:
         if not self.connected:
             raise Exception("Tabular server is not connected")
@@ -800,458 +1203,701 @@ class TabularEditorConnector:
         logger.info("✅ Model changes saved and refreshed.")
 
         return f"✅ Table '{old_table_name}' renamed to '{new_table_name}' with {len(updated_objects)} dependent objects updated."
-    
-    def delete_table(self, table_name: str, confirm: bool = False) -> str:
-        """
-        Safely delete a table from the Tabular model.
-        Includes confirmation, dependency checks, and logging.
-
-        Args:
-            table_name (str): The name of the table to delete.
-            confirm (bool): Whether to confirm the deletion.
-
-        Returns:
-            str: A message indicating the result of the operation.
-        """
-        if not self.connected:
-            raise Exception("Tabular server is not connected")
-
-        try:
-            # Find table
-            table = next((t for t in self.model.Tables if t.Name == table_name), None)
-            if not table:
-                raise Exception(f"Table '{table_name}' not found.")
-
-            # Check for dependencies
-            dependencies = []
-            for tbl in self.model.Tables:
-                for measure in tbl.Measures:
-                    if f"{table_name}[" in measure.Expression:
-                        dependencies.append(f"Measure: {measure.Name} in Table: {tbl.Name}")
-                for calc_col in tbl.Columns:
-                    if hasattr(calc_col, 'IsCalculated') and calc_col.IsCalculated:
-                        if f"{table_name}[" in calc_col.Expression:
-                            dependencies.append(f"Calculated Column: {calc_col.Name} in Table: {tbl.Name}")
-            for rel in self.model.Relationships:
-                if rel.FromTable.Name == table_name:
-                    dependencies.append(f"Relationship From: {rel.FromTable.Name}")
-                if rel.ToTable.Name == table_name:
-                    dependencies.append(f"Relationship To: {rel.ToTable.Name}")
-
-            if dependencies:
-                dependency_list = "\n".join(dependencies)
-                raise Exception(
-                    f"Table '{table_name}' has dependencies:\n{dependency_list}\n"
-                    "Please remove or update these dependencies before deleting the table."
-                )
-
-            # Confirm deletion
-            if not confirm:
-                return (
-                    f"⚠️ Are you sure you want to delete table '{table_name}'? "
-                    "Pass `confirm=True` to proceed."
-                )
-
-            # Remove the table
-            self.model.Tables.Remove(table)
-            self.model.SaveChanges()
-            logger.info(f"Deleted table '{table_name}'.")
-            return f"✅ Table '{table_name}' deleted successfully."
-
-        except Exception as e:
-            logger.error(f"Failed to delete table: {str(e)}")
-            return f"❌ Failed to delete table '{table_name}': {str(e)}"
-        
-    def delete_column(self, table_name: str, column_name: str, confirm: bool = False) -> str:
-        """
-        Safely delete a column from a table in the Tabular model.
-        Includes confirmation, dependency checks, and logging.
-
-        Args:
-            table_name (str): The name of the table.
-            column_name (str): The name of the column to delete.
-            confirm (bool): Whether to confirm the deletion.
-
-        Returns:
-            str: A message indicating the result of the operation.
-        """
-        if not self.connected:
-            raise Exception("Tabular server is not connected")
-
-        try:
-            # Find table
-            table = next((t for t in self.model.Tables if t.Name == table_name), None)
-            if not table:
-                raise Exception(f"Table '{table_name}' not found.")
-
-            # Find column
-            column = next((c for c in table.Columns if c.Name == column_name), None)
-            if not column:
-                raise Exception(f"Column '{column_name}' not found in table '{table_name}'.")
-
-            # Check for dependencies
-            dependencies = []
-            for tbl in self.model.Tables:
-                for measure in tbl.Measures:
-                    if f"{table_name}[{column_name}]" in measure.Expression:
-                        dependencies.append(f"Measure: {measure.Name} in Table: {tbl.Name}")
-                for calc_col in tbl.Columns:
-                    if hasattr(calc_col, 'IsCalculated') and calc_col.IsCalculated:
-                        if f"{table_name}[{column_name}]" in calc_col.Expression:
-                            dependencies.append(f"Calculated Column: {calc_col.Name} in Table: {tbl.Name}")
-            for rel in self.model.Relationships:
-                if rel.FromTable.Name == table_name and rel.FromColumn.Name == column_name:
-                    dependencies.append(f"Relationship From: {rel.FromTable.Name}[{rel.FromColumn.Name}]")
-                if rel.ToTable.Name == table_name and rel.ToColumn.Name == column_name:
-                    dependencies.append(f"Relationship To: {rel.ToTable.Name}[{rel.ToColumn.Name}]")
-
-            if dependencies:
-                dependency_list = "\n".join(dependencies)
-                raise Exception(
-                    f"Column '{column_name}' has dependencies:\n{dependency_list}\n"
-                    "Please remove or update these dependencies before deleting the column."
-                )
-
-            # Confirm deletion
-            if not confirm:
-                return (
-                    f"⚠️ Are you sure you want to delete column '{column_name}' from table '{table_name}'? "
-                    "Pass `confirm=True` to proceed."
-                )
-
-            # Remove the column
-            table.Columns.Remove(column)
-            self.model.SaveChanges()
-            logger.info(f"Deleted column '{column_name}' from table '{table_name}'.")
-            return f"✅ Column '{column_name}' deleted from table '{table_name}'."
-
-        except Exception as e:
-            logger.error(f"Failed to delete column: {str(e)}")
-            return f"❌ Failed to delete column '{column_name}': {str(e)}"
-
-    def execute_dax_query(self, dax_query: str) -> List[Dict[str, Any]]:
-        """Execute a DAX query using AdomdClient"""
-        if not self.connection_string:
-            raise Exception("Not connected to Power BI.")
-        logger.info(f"Executing DAX query:\n{dax_query}")
-        results = []
-        try:
-            conn = AdomdConnection(self.connection_string)
-            conn.Open()
-            cmd = AdomdCommand(dax_query, conn)
-            reader = cmd.ExecuteReader()
-            columns = [reader.GetName(i) for i in range(reader.FieldCount)]
-            while reader.Read():
-                row = {columns[i]: reader.GetValue(i) for i in range(len(columns))}
-                results.append(row)
-            reader.Close()
-            conn.Close()
-            logger.info(f"Returned {len(results)} rows.")
-            return results
-        except Exception as e:
-            logger.error(f"DAX query execution failed: {str(e)}")
-            raise Exception(f"DAX query execution failed: {str(e)}")
-    
-    def create_measure(self, table_name: str, measure_name: str, dax_expression: str):
-        logger.info(f"Attempting to create measure '{measure_name}' in table '{table_name}' with DAX expression: {dax_expression}")
-        if not self.connected:
-            raise Exception("Tabular server is not connected")
-
-        # Find the table (case-insensitive)
-        table = next((t for t in self.model.Tables if t.Name.lower() == table_name.lower()), None)
-        if not table:
-            logger.error(f"Table '{table_name}' not found in the model.")
-            raise Exception(f"Table '{table_name}' not found in the model.")
-
-        # Check if the measure already exists (case-insensitive)
-        if any(m.Name.lower() == measure_name.lower() for m in table.Measures):
-            logger.error(f"Measure '{measure_name}' already exists in table '{table.Name}'.")
-            raise Exception(f"❌ Measure '{measure_name}' already exists in table '{table.Name}'.")
-
-        # Create and add the new measure
-        logger.info(f"Creating measure '{measure_name}' in table '{table.Name}'...")
-        try:
-            new_measure = table.AddMeasure(measure_name, dax_expression, "")
-            self.model.SaveChanges()
-            logger.info(f"✅ Measure '{measure_name}' created successfully in table '{table.Name}'")
-            return f"✅ Measure '{measure_name}' created successfully in table '{table.Name}'"
-        except Exception as e:
-            logger.error(f"❌ Failed to create measure '{measure_name}' in table '{table.Name}': {str(e)}")
-            raise Exception(f"❌ Failed to create measure '{measure_name}' in table '{table.Name}': {str(e)}")
-
-    def list_all_relationships(self) -> Dict[str, Any]:
-        """List all relationships and include the count."""
-        if not self.connected:
-            raise Exception("Tabular server is not connected")
-            
-        relationships = []
-        for rel in self.model.Relationships:
-            rel_id = getattr(rel, 'Name', None) or getattr(rel, 'ID', None)
-            relationships.append({
-                "from_table": rel.FromTable.Name,
-                "from_column": rel.FromColumn.Name,
-                "to_table": rel.ToTable.Name,
-                "to_column": rel.ToColumn.Name,
-                "relationship_id": rel_id
-            })
-        logger.info(f"Found {len(relationships)} relationships in total.")
-        return {"relationships": relationships, "count": len(relationships)}
-
-    def list_table_relationships(self, table_name: str) -> Dict[str, Any]:
-        """List relationships for a specific table."""
-        if not self.connected:
-            raise Exception("Tabular server is not connected")
-            
-        # Find table (case-insensitive)
-        table = next((t for t in self.model.Tables if t.Name.lower() == table_name.lower()), None)
-        if not table:
-            raise Exception(f"Table '{table_name}' not found in the model.")
-            
-        relationships = []
-        for rel in self.model.Relationships:
-            if rel.FromTable.Name == table.Name or rel.ToTable.Name == table.Name:
-                rel_id = getattr(rel, 'Name', None) or getattr(rel, 'ID', None)
-                relationships.append({
-                    "from_table": rel.FromTable.Name,
-                    "from_column": rel.FromColumn.Name,
-                    "to_table": rel.ToTable.Name,
-                    "to_column": rel.ToColumn.Name,
-                    "relationship_id": rel_id
-                })
-        logger.info(f"Found {len(relationships)} relationships for table '{table.Name}'.")
-        return {"relationships": relationships, "count": len(relationships)}
-
-    def refresh_table(self, table_name: str) -> str:
-        """Refresh a specific table in the model."""
-        if not self.connected:
-            raise Exception("Tabular server is not connected.")
-        
-        table = self.model.Tables.Find(table_name)
-        if table is None:
-            raise Exception(f"Table '{table_name}' not found.")
-        
-        table.RequestRefresh(RefreshType.Full)
-        self.model.SaveChanges()
-        
-        return f"Table '{table_name}' refresh initiated successfully."
 
 class PowerBIMCPServer:
-    """Main MCP server for Power BI operations with centralized resource management."""
-    
     def __init__(self):
         self.server = Server("MCP")
-        self.auth_manager = AuthenticationManager()
-        self.sql_metadata = SQLEndpointMetadata(self.auth_manager)
-        self.connector = TabularEditorConnector(self.auth_manager, self.sql_metadata)
-        self.fabric_api = FabricAPIManager(self.auth_manager)
-        self.executor = ThreadPoolExecutor(max_workers=4)
+        self.sql_endpoint = SQLEndpoint()
+        self.fabric = Fabric()
+        self.tabular_editor = TabularEditor()
+        self.is_connected = False
         self.connection_lock = threading.Lock()
+        
+        # Setup server handlers
         self._setup_handlers()
-
-    def _get_python_type_to_json_type(self, python_type):
-        """Convert Python type annotations to JSON schema types."""
-        type_mapping = {
-            str: "string",
-            int: "integer", 
-            float: "number",
-            bool: "boolean",
-            list: "array",
-            dict: "object"
-        }
         
-        # Handle typing module types
-        if hasattr(python_type, '__origin__'):
-            origin = python_type.__origin__
-            if origin is list or origin is List:
-                return "array"
-            elif origin is dict or origin is Dict:
-                return "object"
-            elif origin is Union:  # Handle Optional[Type] which is Union[Type, None]
-                # Get the non-None type from Union
-                args = getattr(python_type, '__args__', ())
-                non_none_types = [arg for arg in args if arg is not type(None)]
-                if non_none_types:
-                    return self._get_python_type_to_json_type(non_none_types[0])
-        
-        return type_mapping.get(python_type, "string")
-
-    def _build_tools_from_objects(self) -> List[Tool]:
-        """Build tools from both TabularEditorConnector and SQLEndpointMetadata methods."""
-        tools = []
-        
-        # Combine methods from both objects
-        objects_to_scan = [
-            (self.connector, "mcp_dataset_"),
-            (self.sql_metadata, "mcp_sql_"),
-            (self.fabric_api, "mcp_api_")
-        ]
-        
-        for obj, prefix in objects_to_scan:
-            for method_name, method in inspect.getmembers(obj, predicate=inspect.ismethod):
-                # Skip private methods and built-in methods
-                if method_name.startswith('_') or method_name in ['__init__']:
-                    continue
-                
-                # Get method signature and docstring
-                sig = inspect.signature(method)
-                doc = inspect.getdoc(method) or f"Execute {method_name} method"
-                
-                # Build input schema
-                properties = {}
-                required = []
-                
-                for param_name, param in sig.parameters.items():
-                    # Skip 'self' parameter
-                    if param_name == 'self':
-                        continue
-                    
-                    # Get parameter type
-                    param_type = "string"  # default
-                    if param.annotation != inspect.Parameter.empty:
-                        param_type = self._get_python_type_to_json_type(param.annotation)
-                    
-                    properties[param_name] = {"type": param_type}
-                    
-                    # Add to required if no default value
-                    if param.default == inspect.Parameter.empty:
-                        required.append(param_name)
-                
-                # Create tool with prefix
-                tool = Tool(
-                    name=f"{prefix}{method_name}",
-                    description=doc,
-                    inputSchema={
-                        "type": "object",
-                        "properties": properties,
-                        "required": required
-                    }
-                )
-                tools.append(tool)
-        
-        return tools
-
     def _setup_handlers(self):
         @self.server.list_tools()
-        async def list_tools() -> List[Tool]:
-            return self._build_tools_from_objects()
-        
-        @self.server.list_prompts()
-        async def handle_list_prompts():
+        async def handle_list_tools() -> List[Tool]:
             return [
-                "connect to Power BI using: mcp_dataset_connect(server_name, database_name)",
-                "list all tables using: mcp_dataset_list_tables()",
-                "add DirectLake table using: mcp_dataset_add_directlake_table(source_table, table_name)",
-                "refresh specific table using: mcp_dataset_refresh_table(table_name)",
-                "initialize SQL connection using: mcp_sql_initialize_connection(sql_endpoint, sql_database)",
-                "query lakehouse tables using: mcp_sql_get_lakehouse_tables_from_sql()",
-                "get table schema using: mcp_sql_get_table_schema(table_name)",
-                "execute SQL query using: mcp_sql_execute_sql_query(query)"
-            ]
-    
-        @self.server.call_tool()
-        async def call_tool(name: str, arguments: Optional[Dict[str, Any]]) -> List[TextContent]:
-            try:
-                # Determine which object to use based on prefix
-                if name.startswith("mcp_dataset_"):
-                    obj = self.connector
-                    method_name = name[12:]  # Remove "mcp_dataset_" prefix
-                elif name.startswith("mcp_sql_"):
-                    obj = self.sql_metadata
-                    method_name = name[8:]   # Remove "mcp_sql_" prefix
-                elif name.startswith("mcp_api_"):
-                    obj = self.fabric_api
-                    method_name = name[8:]   # Remove "mcp_api_" prefix
-                else:
-                    raise ValueError(f"Tool '{name}' not found")
-                
-                # Check if the method exists on the object
-                if not hasattr(obj, method_name):
-                    raise ValueError(f"Method '{method_name}' not found on object")
-                
-                with self.connection_lock:
-                    connector_method = getattr(obj, method_name)
-                    sig = inspect.signature(connector_method)
-                    
-                    # Prepare method arguments
-                    method_args = {}
-                    if arguments:
-                        for param_name, param in sig.parameters.items():
-                            if param_name == 'self':
-                                continue
-                            if param_name in arguments:
-                                method_args[param_name] = arguments[param_name]
-                            elif param.default == inspect.Parameter.empty:
-                                raise ValueError(f"Missing required parameter: {param_name}")
-                    
-                    # Execute method - use executor for potentially long-running operations
-                    if method_name in ['connect', 'add_directlake_table', 'refresh_table']:
-                        result = await asyncio.get_event_loop().run_in_executor(
-                            self.executor,
-                            lambda: connector_method(**method_args)
-                        )
-                    else:
-                        # For quick operations, run directly
-                        result = connector_method(**method_args)
-                    
-                    formatted_result = self._format_result(result)
-                    return [TextContent(type="text", text=formatted_result)]
-                    
-            except Exception as e:
-                logger.error(f"Error executing tool '{name}': {str(e)}")
-                error_msg = f"Error executing tool '{name}': {str(e)}"
-                return [TextContent(type="text", text=error_msg)]
-
-    def _format_result(self, result: Any) -> str:
-        """Format the result from connector methods for MCP response."""
-        if result is None:
-            return "Operation completed successfully"
-        elif isinstance(result, bool):
-            return "True" if result else "False"
-        elif isinstance(result, (str, int, float)):
-            return str(result)
-        elif isinstance(result, pd.DataFrame):
-            return result.to_string(index=False)
-        elif isinstance(result, (list, tuple)):
-            if all(isinstance(item, str) for item in result):
-                return "\n".join(result)
-            else:
-                return json.dumps(result, indent=2, default=str)
-        elif isinstance(result, dict):
-            return json.dumps(result, indent=2, default=str)
-        else:
-            return str(result)
-
-    async def run(self):
-        logger.info("Starting MCP Server...")
-        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            await self.server.run(
-                read_stream,
-                write_stream,
-                InitializationOptions(
-                    server_name="MCP",
-                    server_version="1.0.0",
-                    capabilities=self.server.get_capabilities(NotificationOptions(), {})
-                )
+            Tool(
+                name="initialize_sql_connection",
+                description="Initialize SQL connection with server and database details.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "sql_endpoint": {"type": "string"},
+                        "sql_database": {"type": "string"}
+                    },
+                    "required": ["sql_endpoint", "sql_database"]
+                }
+            ),
+            Tool(
+                name="get_sql_tables",
+                description="Retrieve a list of tables from the SQL database.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                    },
+                    "required": []
+                }
+            ),
+            Tool(
+                name="get_sql_table_schema",
+                description="Retrieve the schema of a specific table from the SQL database.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "table_name": {"type": "string"}
+                    },
+                    "required": ["table_name"]
+                }
+            ),
+            Tool(
+                name="create_measure",
+                description="Create a new measure in the model.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "table_name": {"type": "string"},
+                        "measure_name": {"type": "string"},
+                        "dax_expression": {"type": "string"}
+                    },
+                    "required": ["table_name","measure_name","dax_expression"]
+                }
+            ),
+            Tool(
+                name="update_column_names",
+                description="Update column names in the model.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "table_name": {"type": "string"},
+                        "old_col_name": {"type": "string"},
+                        "new_col_name": {"type": "string"}
+                    },
+                    "required": ["table_name","old_col_name","new_col_name"]
+                }
+            ),Tool(
+                name="update_table_name",
+                description="Update table names in the model.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "old_table_name": {"type": "string"},
+                        "new_table_name": {"type": "string"},
+                        "confirm": {"type": "boolean"}
+                    },
+                    "required": ["old_table_name","new_table_name"]
+                }
+            ),
+            Tool(
+                name="execute_sql_query",
+                description="Execute a SQL query against the database.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"}
+                    },
+                    "required": ["query"]
+                }
+            ),
+            Tool(
+                name="execute_dax_query",
+                description="Execute a DAX query against the database.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "dax_query": {"type": "string"}
+                    },
+                    "required": ["dax_query"]
+                }
+            ),
+            Tool(
+                name="get_workspace_info",
+                description="Retrieve information about the workspace.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "workspace_identifier": {"type": "string"}
+                    },
+                    "required": ["workspace_identifier"]
+                }
+            ),
+            Tool(
+                name="get_lakehouse_info",
+                description="Retrieve information about the lakehouse and sql endpoint.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "workspace_identifier": {"type": "string"},
+                        "lakehouse_identifier": {"type": "string"}
+                    },
+                    "required": ["workspace_identifier", "lakehouse_identifier"]
+                }
+            ),
+            Tool(
+                name="create_lakehouse",
+                description="Create a new lakehouse.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "workspace_identifier": {"type": "string"},
+                        "lakehouse_name": {"type": "string"}
+                    },
+                    "required": ["workspace_identifier", "lakehouse_name"]
+                }
+            ),
+            Tool(
+                name="create_lakehouse_shortcut",
+                description="Create a lakehouse shortcut with MCP elicitation for approval.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                    },
+                    "required": []
+                }
+            ),
+            Tool(
+                name="connect_dataset",
+                description="Connect to a Power BI dataset using workspace_identifier (workspace name or ID) and database_name (dataset name)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "workspace_identifier": {
+                            "type": "string",
+                            "description": "The workspace name or workspace ID (not server_name)"
+                        },
+                        "database_name": {
+                            "type": "string",
+                            "description": "The Power BI dataset/database name"
+                        }
+                    },
+                    "required": ["workspace_identifier","database_name"]
+                }
+            ),
+            Tool(
+                name="add_directlake_table",
+                description="Add a DirectLake table to the Power BI dataset using workspace_identifier (workspace name or ID) and database_name (dataset name)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "source_table": {
+                            "type": "string",
+                            "description": "The source table name"
+                        },
+                        "table_name": {
+                            "type": "string",
+                            "description": "power bi table name"
+                        }
+                    },
+                    "required": ["source_table"]
+                }
+            ),
+            Tool(
+                name="disconnect_dataset",
+                description="Disconnecting power bi dataset after use",
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            ),
+            Tool(
+                name="list_tables",
+                description="List all tables in the connected semantic model.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            ),
+            Tool(
+                name="list_all_relationships",
+                description="List all relationships in the connected semantic model.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            ),
+            Tool(
+                name="create_semantic_model",
+                description="Create a comprehensive DirectLake semantic model using TMSL for full DAX Studio and XMLA support with automatic refresh",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "workspace_identifier": {"type": "string", "description": "The workspace name or workspace ID"},
+                        "lakehouse_identifier": {"type": "string", "description": "The lakehouse name or lakehouse ID"},
+                        "semantic_model_name": {"type": "string", "description": "Name for the new semantic model"},
+                        "selected_tables": {"type": "array", "items": {"type": "string"}, "description": "Optional list of specific tables to include"},
+                        "description": {"type": "string", "description": "Optional description for the semantic model"}
+                    },
+                    "required": ["workspace_identifier", "semantic_model_name", "lakehouse_identifier"]
+                }
+            ),
+            Tool(
+                name="select_tables_with_schema",
+                description="Select specific tables and return their schemas, or return all tables if none specified",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "selected_table_names": {"type": "array", "items": {"type": "string"}, "description": "Optional list of specific table names to get schema for"}
+                    },
+                    "required": []
+                }
+            ),
+            Tool(
+                name="refresh_semantic_model",
+                description="Refresh a Power BI dataset using workspace_identifier (workspace name or ID) and database_name (dataset name)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "workspace_identifier": {
+                            "type": "string",
+                            "description": "The workspace name or workspace ID (not server_name)"
+                        },
+                        "semantic_model_name": {
+                            "type": "string",
+                            "description": "The name of the semantic model to refresh"
+                        },
+                        "refresh_type": {
+                            "type": "string",
+                            "description": "The type of refresh to perform"
+                        }
+                    },
+                    "required": ["workspace_identifier","semantic_model_name"]
+                }
             )
-    
-    def __del__(self):
-        """Cleanup resources when server is destroyed."""
-        try:
-            if hasattr(self, 'executor'):
-                self.executor.shutdown(wait=False)
-            if hasattr(self, 'connector') and self.connector.connected:
-                self.connector.disconnect()
-        except:
-            pass
+        ]
+        @self.server.call_tool()
+        async def handle_call_tool(name: str, arguments: Optional[Dict[str, Any]]) -> List[TextContent]:
+            """Handle tool calls and return results as TextContent"""
+            try:
+                logger.info(f"Handling tool call: {name}")
+                
+                if name == "initialize_sql_connection":
+                    result = await self._handle_initialize_sql_connection(arguments)
+                elif name == "get_sql_tables":
+                    result = await self._handle_get_sql_tables(arguments)
+                elif name == "get_sql_table_schema":
+                    result = await self._handle_get_sql_table_schema(arguments)
+                elif name == "execute_sql_query":
+                    result = await self._handle_execute_sql_query(arguments)
+                elif name == "get_workspace_info":
+                    result = await self._handle_get_workspace_info(arguments)
+                elif name == "get_lakehouse_info":
+                    result = await self._handle_get_lakehouse_info(arguments)
+                elif name == "create_lakehouse":
+                    result = await self._handle_create_lakehouse(arguments)
+                elif name == "create_lakehouse_shortcut":
+                    result = await self._handle_create_lakehouse_shortcut(arguments)
+                elif name == "connect_dataset":
+                    result = await self._handle_connect_dataset(arguments)
+                elif name == "list_tables":
+                    result = await self._handle_list_tables(arguments)
+                elif name == "disconnect_dataset":
+                    result = await self._handle_disconnect_dataset(arguments)
+                elif name == "create_semantic_model":
+                    result = await self._handle_create_semantic_model(arguments)
+                elif name == "select_tables_with_schema":
+                    result = await self._handle_select_tables_with_schema(arguments)
+                elif name == "refresh_semantic_model":
+                    result = await self._handle_refresh_semantic_model(arguments)
+                elif name == "execute_dax_query":
+                    result = await self._handle_execute_dax_query(arguments)
+                elif name == "create_measure":
+                    result = await self._handle_create_measure(arguments)
+                elif name == "list_all_relationships":
+                    result = await self._handle_list_all_relationships(arguments)  
+                elif name == "update_column_names":
+                    result = await self._handle_update_column_names(arguments)
+                elif name == "update_table_name":
+                    result = await self._handle_update_table_name(arguments)
+                else:
+                    logger.warning(f"Unknown tool: {name}")
+                    return [TextContent(type="text", text=f"Unknown tool: {name}")]
+                
+                # Convert string result to TextContent
+                return [TextContent(type="text", text=result)]
+                
+            except Exception as e:
+                logger.error(f"Error executing {name}: {str(e)}", exc_info=True)
+                return [TextContent(type="text", text=f"Error executing {name}: {str(e)}")]
 
+    async def _handle_initialize_sql_connection(self, arguments: Dict[str, Any]) -> str:
+        """Handle initialization of SQL connection"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.sql_endpoint.initialize_sql_connection,
+                    arguments["sql_endpoint"],
+                    arguments["sql_database"]
+                )
+                return str(result)
+
+        except Exception as e:
+            logger.error(f"Connection failed: {str(e)}")
+            return f"Connection failed: {str(e)}"
+
+    async def _handle_get_sql_tables(self, arguments: Dict[str, Any]) -> str:
+        """Handle retrieval of SQL tables"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.sql_endpoint.get_sql_tables
+                )
+                return str(result)
+
+        except Exception as e:
+            return f"Connection failed: {str(e)}"
+
+    async def _handle_get_sql_table_schema(self, arguments: Dict[str, Any]) -> str:
+        """Handle retrieval of SQL table schema"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.sql_endpoint.get_sql_table_schema,
+                    arguments["table_name"]
+                )
+                return str(result)
+
+        except Exception as e:
+            logger.error(f"Connection failed: {str(e)}")
+            return f"Connection failed: {str(e)}"
+        
+    async def _handle_create_measure(self, arguments: Dict[str, Any]) -> str:
+        """Handle creation of a new measure"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.tabular_editor.create_measure,
+                    arguments["table_name"],
+                    arguments["measure_name"],
+                    arguments["dax_expression"]
+                )
+                return str(result)
+
+        except Exception as e:
+            logger.error(f"Connection failed: {str(e)}")
+            return f"Connection failed: {str(e)}"
+
+
+    async def _handle_execute_sql_query(self, arguments: Dict[str, Any]) -> str:
+        """Handle execution of SQL query"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.sql_endpoint.execute_sql_query,
+                    arguments["query"]
+                )
+                return str(result)
+
+        except Exception as e:
+            logger.error(f"Connection failed: {str(e)}")
+            return f"Connection failed: {str(e)}"
+    
+    async def _handle_execute_dax_query(self, arguments: Dict[str, Any]) -> str:
+        """Handle execution of DAX query"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.tabular_editor.execute_dax_query,
+                    arguments["dax_query"]
+                )
+                return str(result)
+
+        except Exception as e:
+            logger.error(f"Connection failed: {str(e)}")
+            return f"Connection failed: {str(e)}"
+
+    async def _handle_get_workspace_info(self, arguments: Dict[str, Any]) -> str:
+        """Handle retrieval of workspace information"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.fabric.get_workspace_info,
+                    arguments["workspace_identifier"]
+                )
+                return str(result)
+
+        except Exception as e:
+            logger.error(f"Connection failed: {str(e)}")
+            return f"Connection failed: {str(e)}"
+    
+    async def _handle_get_lakehouse_info(self, arguments: Dict[str, Any]) -> str:
+        """Handle retrieval of lakehouse information"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.fabric.get_lakehouse_info,
+                    arguments["workspace_identifier"],
+                    arguments["lakehouse_identifier"]
+                )
+                return str(result)
+
+        except Exception as e:
+            logger.error(f"Connection failed: {str(e)}")
+            return f"Connection failed: {str(e)}"
+
+    async def _handle_create_lakehouse(self, arguments: Dict[str, Any]) -> str:
+        """Handle creation of lakehouse"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.fabric.create_lakehouse,
+                    arguments["workspace_identifier"],
+                    arguments["lakehouse_name"]
+                )
+                return str(result)
+
+        except Exception as e:
+            logger.error(f"Connection failed: {str(e)}")
+            return f"Connection failed: {str(e)}"
+
+    
+    async def _handle_connect_dataset(self, arguments: Dict[str, Any]) -> str:
+        """Handle connection to Power BI"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.tabular_editor.connect_dataset,
+                    arguments["workspace_identifier"],
+                    arguments["database_name"]
+                )
+                return str(result)
+                
+        except Exception as e:
+            logger.error(f"Connection failed: {str(e)}")
+            return f"Connection failed: {str(e)}"
+
+    async def _handle_refresh_semantic_model(self, arguments: Dict[str, Any]) -> str:
+        """Handle refresh of Power BI dataset"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.tabular_editor.refresh_semantic_model,
+                    arguments["workspace_identifier"],
+                    arguments["semantic_model_name"],
+                    arguments["refresh_type"]
+                )
+                return str(result)
+                
+        except Exception as e:
+            logger.error(f"Connection failed: {str(e)}")
+            return f"Connection failed: {str(e)}"
+
+    async def _handle_update_table_name(self, arguments: Dict[str, Any]) -> str:
+        """Handle update of table name in Power BI dataset"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.tabular_editor.refresh_semantic_model,
+                    arguments["old_table_name"],
+                    arguments["new_table_name"],
+                    arguments["confirm"]
+                )
+                return str(result)
+                
+        except Exception as e:
+            logger.error(f"Connection failed: {str(e)}")
+            return f"Connection failed: {str(e)}"
+
+    async def _handle_update_column_names(self, arguments: Dict[str, Any]) -> str:
+        """Handle update of column names in Power BI dataset"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.tabular_editor.refresh_semantic_model,
+                    arguments["table_name"],
+                    arguments["new_col_name"],
+                    arguments["old_col_name"]
+                )
+                return str(result)
+                
+        except Exception as e:
+            logger.error(f"Connection failed: {str(e)}")
+            return f"Connection failed: {str(e)}"
+    
+    async def _handle_disconnect_dataset(self, arguments: Dict[str, Any]) -> str:
+        """Handle disconnection from Power BI dataset"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                msg = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.tabular_editor.disconnect_dataset
+                )
+                return str(msg)
+
+        except Exception as e:
+            logger.error(f"error in disconnecting the model from mcp server: {str(e)}")
+            return f"error in disconnecting the model from mcp server: {str(e)}"
+
+    async def _handle_list_tables(self, arguments: Dict[str, Any]) -> str:
+        """Handle listing tables in the Power BI dataset"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                msg = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.tabular_editor.list_tables
+                )
+                return str(msg)
+
+        except Exception as e:
+            logger.error(f"Error listing tables in the model from mcp server: {str(e)}")
+            return f"Error listing tables in the model from mcp server: {str(e)}"
+
+    async def _handle_list_all_relationships(self, arguments: Dict[str, Any]) -> str:
+        """Handle listing all relationships in the Power BI dataset"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                msg = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.tabular_editor.list_all_relationships
+                )
+                return str(msg)
+
+        except Exception as e:
+            logger.error(f"Error listing all relationships in the model from mcp server: {str(e)}")
+            return f"Error listing all relationships in the model from mcp server: {str(e)}"
+
+    async def _handle_create_semantic_model(self, arguments: Dict[str, Any]) -> str:
+        """Handle creation of semantic model"""
+        print("🔥 HANDLER CALLED - _handle_create_semantic_model")
+        logger.info("🔥 HANDLER CALLED - _handle_create_semantic_model")
+        try:
+            print(f"🔥 Handler received arguments: {arguments}")
+            logger.info(f"🔥 Handler received arguments: {arguments}")
+            selected_tables = arguments.get("selected_tables")
+            print(f"🔥 Extracted selected_tables: {selected_tables}, type: {type(selected_tables)}")
+            logger.info(f"🔥 Extracted selected_tables: {selected_tables}, type: {type(selected_tables)}")
+            
+            with self.connection_lock:
+                print("🔥 About to call tabular_editor.create_semantic_model")
+                logger.info("🔥 About to call tabular_editor.create_semantic_model")
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.tabular_editor.create_semantic_model,
+                    arguments["workspace_identifier"],
+                    arguments["lakehouse_identifier"],
+                    arguments["semantic_model_name"],
+                    selected_tables,
+                    arguments.get("description")
+                )
+                print(f"🔥 Result from create_semantic_model: {result}")
+                logger.info(f"🔥 Result from create_semantic_model: {result}")
+                return json.dumps(result)
+
+        except Exception as e:
+            print(f"🔥 ERROR in handler: {str(e)}")
+            logger.error(f"🔥 ERROR in handler: {str(e)}")
+            return f"Error creating semantic model: {str(e)}"
+
+    async def _handle_select_tables_with_schema(self, arguments: Dict[str, Any]) -> str:
+        """Handle selection of tables with schema"""
+        try:
+            with self.connection_lock:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.tabular_editor.select_tables_with_schema,
+                    arguments.get("selected_table_names")
+                )
+                return json.dumps(result)
+
+        except Exception as e:
+            logger.error(f"Error selecting tables with schema: {str(e)}")
+            return f"Error selecting tables with schema: {str(e)}"
+
+    async def _handle_create_lakehouse_shortcut(self, arguments: Dict[str, Any]) -> str:
+        """Handle creation of lakehouse shortcut with approval elicitation"""
+        try:
+            with self.connection_lock:
+                # Call the unified method with all parameters including approved, using get to handle optional parameters
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: asyncio.run(self.fabric.create_lakehouse_shortcut(
+                        arguments.get("target_workspace"),
+                        arguments.get("target_lakehouse"),
+                        arguments.get("target_shortcut_path"),
+                        arguments.get("target_shortcut_name"),
+                        arguments.get("source_workspace"),
+                        arguments.get("source_lakehouse"),
+                        arguments.get("source_path"),
+                        arguments.get("approved", False)
+                    ))
+                )
+                
+                return json.dumps(result)
+
+        except Exception as e:
+            logger.error(f"Error creating shortcut: {str(e)}")
+            return f"Error creating shortcut: {str(e)}"
+    
+    async def run(self):
+        """Run the MCP server"""
+        try:
+            logger.info("Starting Power BI MCP Server...")
+            async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+                await self.server.run(
+                    read_stream,
+                    write_stream,
+                    InitializationOptions(
+                        server_name="MCP",
+                        server_version="1.0.1",
+                        capabilities=self.server.get_capabilities(
+                            notification_options=NotificationOptions(),
+                            experimental_capabilities={},
+                        ),
+                    ),
+                )
+        except anyio.BrokenResourceError:
+            logger.info("Client disconnected")
+        except Exception as e:
+            logger.error(f"Server error: {e}", exc_info=True)
+        finally:
+            logger.info("Server shutting down")
+
+# Main entry point
 async def main():
-    await PowerBIMCPServer().run()
+    server = PowerBIMCPServer()
+    await server.run()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Server stopped by user.")
+        logger.info("Server stopped by user")
     except Exception as e:
-        logger.exception("Fatal error")
+        logger.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)
+
+
