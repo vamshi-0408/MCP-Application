@@ -94,5 +94,4 @@ temp/
 *.tmp
 
 # Documentation files to ignore
-copilot-instructions.MD
 Business Requirements.MD

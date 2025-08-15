@@ -286,12 +286,12 @@ class Fabric:
         except Exception as e:
             return f"{str(e)}"
 
-    async def create_lakehouse_shortcut(self, target_workspace: str = None, target_lakehouse: str = None, target_shortcut_path: str = None, target_shortcut_name: str = None, source_workspace: str = None, source_lakehouse: str = None, source_path: str = None, approved: bool = None) -> dict:
-        """Creating shortcuts from authoritative workspace and lakehouse into target workspace, target lakehouse and target path with MCP elicitation for approval."""
+    async def create_lakehouse_shortcut(self, target_workspace: str = None, target_lakehouse: str = None, target_shortcut_path: str = None, target_shortcut_name: str = None, source_workspace: str = None, source_lakehouse: str = None, source_path: str = None) -> dict:
+        """Creating shortcuts from authoritative workspace and lakehouse into target workspace, target lakehouse and target path without approval requirement."""
         try:
             # If no parameters provided, return elicitation prompt to collect all details
             if not all([target_workspace, target_lakehouse, target_shortcut_path, target_shortcut_name, source_workspace, source_lakehouse, source_path]):
-                approval_prompt = """
+                collection_prompt = """
 Create Lakehouse Shortcut
 
 Please provide the following information for creating the lakehouse shortcut:
@@ -304,12 +304,12 @@ Please provide the following information for creating the lakehouse shortcut:
 6. Source Lakehouse: Name or ID of the source lakehouse
 7. Source Path: Path in source lakehouse (e.g., 'Tables/table_name' or 'Files/folder')
 
-After providing these details, you will be asked for final approval before creating the shortcut.
+The shortcut will be created automatically once all details are provided.
                 """
 
                 return {
                     "type": "elicitation_required",
-                    "prompt": approval_prompt.strip(),
+                    "prompt": collection_prompt.strip(),
                     "properties": {
                         "target_workspace": {"type": "string", "description": "Name or ID of the target workspace"},
                         "target_lakehouse": {"type": "string", "description": "Name or ID of the target lakehouse"},
@@ -363,61 +363,7 @@ After providing these details, you will be asked for final approval before creat
                 }
             }
 
-            # If not approved, return elicitation prompt for approval
-            if not approved:
-                approval_prompt = f"""
-Create Lakehouse Shortcut - Final Approval Required
-
-Review the following shortcut details:
-
-Source:
-- Workspace: {source_workspace_name} (ID: {source_workspace_id})
-- Lakehouse: {source_lakehouse_name} (ID: {source_lakehouse_id})
-- Path: {source_path}
-
-Target:
-- Workspace: {target_workspace_name} (ID: {target_workspace_id})
-- Lakehouse: {target_lakehouse_name} (ID: {target_lakehouse_id})
-- Shortcut Path: {target_shortcut_path}
-- Shortcut Name: {target_shortcut_name}
-
-This operation will create a shortcut linking the source data to the target location.
-Do you approve creating this shortcut?
-
-Reply with 'yes' to approve or 'no' to cancel.
-                """
-
-                return {
-                    "type": "elicitation_required",
-                    "prompt": approval_prompt.strip(),
-                    "request_body": request_body,
-                    "target_workspace_id": target_workspace_id,
-                    "target_lakehouse_id": target_lakehouse_id,
-                    "properties": {
-                        "target_workspace": {"type": "string", "description": "Name or ID of the target workspace"},
-                        "target_lakehouse": {"type": "string", "description": "Name or ID of the target lakehouse"},
-                        "target_shortcut_path": {"type": "string", "description": "Path in target lakehouse (e.g., 'Tables' or 'Files/folder')"},
-                        "target_shortcut_name": {"type": "string", "description": "Name for the shortcut"},
-                        "source_workspace": {"type": "string", "description": "Name or ID of the source workspace"},
-                        "source_lakehouse": {"type": "string", "description": "Name or ID of the source lakehouse"},
-                        "source_path": {"type": "string", "description": "Path in source lakehouse (e.g., 'Tables/table_name' or 'Files/folder')"},
-                        "approved": {"type": "boolean", "description": "Final approval confirmation", "default": False}
-                    },
-                    "required_properties": ["target_workspace", "target_lakehouse", "target_shortcut_path", "target_shortcut_name", "source_workspace", "source_lakehouse", "source_path", "approved"],
-                    "source_info": {
-                        "workspace": source_workspace_name,
-                        "lakehouse": source_lakehouse_name,
-                        "path": source_path
-                    },
-                    "target_info": {
-                        "workspace": target_workspace_name,
-                        "lakehouse": target_lakehouse_name,
-                        "shortcut_path": target_shortcut_path,
-                        "shortcut_name": target_shortcut_name
-                    }
-                }
-
-            # If approved, proceed with shortcut creation
+            # Proceed directly with shortcut creation (no approval required)
             if not self.access_token:
                 self.access_token = self.auth_manager.get_access_token(force_refresh=True)
 
@@ -1191,114 +1137,13 @@ class TabularEditor:
             logger.error(f"Failed to create DirectLake table '{table_name}': {e}")
             raise Exception(f"Failed to create DirectLake table '{table_name}': {e}")
     
-    def update_column_names(self, table_name: str, old_col_name: str, new_col_name: str):
-        if not self.connected: 
-            logger.info("Tabular server is not connected")
-            raise "Tabular server is not connected"
-        try:
-            table = next((t for t in self.model.Tables if t.Name == table_name), None)
-            if not table:
-                raise Exception(f"Table '{table_name}' not found!")
- 
-            column = next((c for c in table.Columns if c.Name == old_col_name), None)
-            if not column:
-                raise Exception(f"Column '{old_col_name}' not found!")
-            
-            # Check if it's a system-generated column that shouldn't be renamed
-            if 'RowNumber' in old_col_name or old_col_name.startswith('RowNumber'):
-                raise Exception(f"Cannot rename system-generated column '{old_col_name}'. System columns are read-only.")
- 
-            column.Name = new_col_name
-            logger.info(f"Renamed column '{old_col_name}' to '{new_col_name}'")
- 
-            def update_expr(expr):
-                pattern = fr'{re.escape(table_name)}\[\s*{re.escape(old_col_name)}\s*\]'
-                return re.sub(pattern, f"{table_name}[{new_col_name}]", expr)
- 
-            for tbl in self.model.Tables:
-                for measure in tbl.Measures:
-                    if f"{table_name}[{old_col_name}]" in measure.Expression:
-                        old_expr = measure.Expression
-                        measure.Expression = update_expr(measure.Expression)
-                        logger.info(f"Updated measure '{measure.Name}' in table '{tbl.Name}'")
-                        logger.info(f" Old: {old_expr}")
-                        logger.info(f" New: {measure.Expression}")
- 
-            for tbl in self.model.Tables:
-                for calc_col in tbl.Columns:
-                    if hasattr(calc_col, 'IsCalculated') and calc_col.IsCalculated:
-                        if f"{table_name}[{old_col_name}]" in calc_col.Expression:
-                            old_expr = calc_col.Expression
-                            calc_col.Expression = update_expr(calc_col.Expression)
-                            logger.info(f"Updated calculated column '{calc_col.Name}' in table '{tbl.Name}'")
-                            logger.info(f" Old: {old_expr}")
-                            logger.info(f" New: {calc_col.Expression}")
- 
-            for rel in self.model.Relationships:
-                if rel.FromTable.Name == table_name and rel.FromColumn.Name == old_col_name:
-                    rel.FromColumn = table.Columns[new_col_name]
-                    logger.info(f"Updated FromColumn in relationship ID {rel.ID}")
-                if rel.ToTable.Name == table_name and rel.ToColumn.Name == old_col_name:
-                    rel.ToColumn = table.Columns[new_col_name]
-                    logger.info(f"Updated ToColumn in relationship ID {rel.ID}")
- 
-            self.model.RequestRefresh(RefreshType.Automatic)
-            self.model.SaveChanges()
-            msg = "Table name rename successfully and automatic refresh is triggered."
-            logger.info("Model changes saved and refresh triggered.")
-        except Exception as e: 
-            msg = str(e)
-        return msg
+    # REMOVED: update_column_names - use safe_rename_with_dependencies instead
+    # This function was redundant as safe_rename_with_dependencies provides
+    # comprehensive dependency checking and safe renaming for columns
     
-    def update_table_name(self, old_table_name: str, new_table_name: str, confirm: bool = False) -> str:
-        if not self.connected:
-            raise Exception("Tabular server is not connected")
-
-        table = next((t for t in self.model.Tables if t.Name.lower() == old_table_name.lower()), None)
-        if not table:
-            raise Exception(f"❌ Table '{old_table_name}' not found!")
-
-        if any(t.Name.lower() == new_table_name.lower() for t in self.model.Tables):
-            raise Exception(f"❌ A table named '{new_table_name}' already exists.")
-
-        # Confirm renaming
-        if not confirm:
-            return (
-                f"⚠️ Are you sure you want to rename table '{old_table_name}' to '{new_table_name}'? "
-                "Pass `confirm=True` to proceed."
-            )
-
-        # Proceed with renaming
-        table.Name = new_table_name
-        logger.info(f"✅ Renamed table '{old_table_name}' to '{new_table_name}'")
-
-        def update_expr(expr):
-            pattern = fr'\b{re.escape(old_table_name)}\s*\['
-            return re.sub(pattern, f"{new_table_name}[", expr)
-
-        updated_objects = []
-
-        for tbl in self.model.Tables:
-            # Update Measures
-            for measure in tbl.Measures:
-                if f"{old_table_name}[" in measure.Expression:
-                    measure.Expression = update_expr(measure.Expression)
-                    logger.info(f"🔁 Updated measure '{measure.Name}' in table '{tbl.Name}'")
-                    updated_objects.append(("Measure", tbl.Name, measure.Name))
-
-            # Update Calculated Columns
-            for col in tbl.Columns:
-                if hasattr(col, 'IsCalculated') and col.IsCalculated:
-                    if f"{old_table_name}[" in col.Expression:
-                        col.Expression = update_expr(col.Expression)
-                        logger.info(f"🔁 Updated calculated column '{col.Name}' in table '{tbl.Name}'")
-                        updated_objects.append(("Column", tbl.Name, col.Name))
-
-        self.model.RequestRefresh(RefreshType.Automatic)
-        self.model.SaveChanges()
-        logger.info("✅ Model changes saved and refreshed.")
-
-        return f"✅ Table '{old_table_name}' renamed to '{new_table_name}' with {len(updated_objects)} dependent objects updated."
+    # REMOVED: update_table_name - use safe_rename_with_dependencies instead
+    # This function was redundant as safe_rename_with_dependencies provides
+    # comprehensive dependency checking and safe renaming for tables
     
     def create_relationship(self, from_table: str, from_column: str, to_table: str, to_column: str, 
                        is_active: bool = True, cross_filter_direction: str = "OneDirection") -> str:
@@ -2292,6 +2137,498 @@ class TabularEditor:
             logger.error(f"Failed to classify all measures: {e}")
             raise Exception(f"Failed to classify all measures: {e}")
 
+    def analyze_dependencies(self, object_type: str, object_name: str, table_name: str = None) -> Dict[str, Any]:
+        """
+        Analyze dependencies for a given object (table, column, or measure) before renaming.
+        
+        Args:
+            object_type: Type of object ('table', 'column', 'measure')
+            object_name: Name of the object to analyze
+            table_name: Name of the table (required for column and measure)
+            
+        Returns:
+            Dictionary with dependency analysis results
+        """
+        if not self.connected:
+            raise Exception("Tabular server is not connected.")
+        
+        try:
+            dependencies = {
+                "object_info": {
+                    "type": object_type,
+                    "name": object_name,
+                    "table_name": table_name
+                },
+                "dependent_measures": [],
+                "dependent_calculated_columns": [],
+                "dependent_relationships": [],
+                "dependent_table_security_roles": [],
+                "impact_summary": {
+                    "total_objects_affected": 0,
+                    "risk_level": "LOW",
+                    "recommendations": []
+                }
+            }
+            
+            if object_type.lower() == "table":
+                dependencies = self._analyze_table_dependencies(object_name, dependencies)
+            elif object_type.lower() == "column":
+                dependencies = self._analyze_column_dependencies(table_name, object_name, dependencies)
+            elif object_type.lower() == "measure":
+                dependencies = self._analyze_measure_dependencies(table_name, object_name, dependencies)
+            else:
+                raise Exception(f"Unsupported object type: {object_type}")
+            
+            # Calculate risk level and recommendations
+            dependencies = self._calculate_risk_level(dependencies)
+            
+            logger.info(f"Dependency analysis completed for {object_type} '{object_name}'. Found {dependencies['impact_summary']['total_objects_affected']} dependent objects.")
+            return dependencies
+            
+        except Exception as e:
+            logger.error(f"Failed to analyze dependencies: {e}")
+            raise Exception(f"Failed to analyze dependencies: {e}")
+
+    def _analyze_table_dependencies(self, table_name: str, dependencies: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze dependencies for a table."""
+        table = next((t for t in self.model.Tables if t.Name.lower() == table_name.lower()), None)
+        if not table:
+            raise Exception(f"Table '{table_name}' not found.")
+        
+        # Check measures in other tables that reference this table
+        for other_table in self.model.Tables:
+            for measure in other_table.Measures:
+                if measure.Expression and re.search(rf'\b{re.escape(table_name)}\s*\[', measure.Expression):
+                    dependencies["dependent_measures"].append({
+                        "table": other_table.Name,
+                        "measure": measure.Name,
+                        "expression": measure.Expression[:200] + "..." if len(measure.Expression) > 200 else measure.Expression,
+                        "impact": "DAX expression contains table reference"
+                    })
+        
+        # Check calculated columns in other tables
+        for other_table in self.model.Tables:
+            for column in other_table.Columns:
+                if hasattr(column, 'Expression') and column.Expression:
+                    if re.search(rf'\b{re.escape(table_name)}\s*\[', column.Expression):
+                        dependencies["dependent_calculated_columns"].append({
+                            "table": other_table.Name,
+                            "column": column.Name,
+                            "expression": column.Expression[:200] + "..." if len(column.Expression) > 200 else column.Expression,
+                            "impact": "Calculated column expression contains table reference"
+                        })
+        
+        # Check relationships
+        for relationship in self.model.Relationships:
+            if (relationship.FromTable.Name.lower() == table_name.lower() or 
+                relationship.ToTable.Name.lower() == table_name.lower()):
+                dependencies["dependent_relationships"].append({
+                    "name": relationship.Name,
+                    "from_table": relationship.FromTable.Name,
+                    "from_column": relationship.FromColumn.Name,
+                    "to_table": relationship.ToTable.Name,
+                    "to_column": relationship.ToColumn.Name,
+                    "is_active": relationship.IsActive,
+                    "impact": "Relationship involves this table"
+                })
+        
+        # Check table security roles
+        for role in self.model.Roles:
+            for table_permission in role.TablePermissions:
+                if table_permission.Table.Name.lower() == table_name.lower():
+                    dependencies["dependent_table_security_roles"].append({
+                        "role_name": role.Name,
+                        "table": table_permission.Table.Name,
+                        "filter_expression": getattr(table_permission, 'FilterExpression', 'No filter'),
+                        "impact": "Role has permissions on this table"
+                    })
+        
+        return dependencies
+
+    def _analyze_column_dependencies(self, table_name: str, column_name: str, dependencies: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze dependencies for a column."""
+        table = next((t for t in self.model.Tables if t.Name.lower() == table_name.lower()), None)
+        if not table:
+            raise Exception(f"Table '{table_name}' not found.")
+        
+        column = next((c for c in table.Columns if c.Name.lower() == column_name.lower()), None)
+        if not column:
+            raise Exception(f"Column '{column_name}' not found in table '{table_name}'.")
+        
+        # Check measures that reference this column
+        for search_table in self.model.Tables:
+            for measure in search_table.Measures:
+                if measure.Expression:
+                    # Look for both Table[Column] and [Column] references
+                    column_patterns = [
+                        rf'\b{re.escape(table_name)}\s*\[\s*{re.escape(column_name)}\s*\]',
+                        rf'(?<!\w)\[\s*{re.escape(column_name)}\s*\]' if search_table.Name == table_name else None
+                    ]
+                    
+                    for pattern in column_patterns:
+                        if pattern and re.search(pattern, measure.Expression):
+                            dependencies["dependent_measures"].append({
+                                "table": search_table.Name,
+                                "measure": measure.Name,
+                                "expression": measure.Expression[:200] + "..." if len(measure.Expression) > 200 else measure.Expression,
+                                "impact": "DAX expression references this column"
+                            })
+                            break
+        
+        # Check calculated columns that reference this column
+        for search_table in self.model.Tables:
+            for calc_column in search_table.Columns:
+                if hasattr(calc_column, 'Expression') and calc_column.Expression:
+                    column_patterns = [
+                        rf'\b{re.escape(table_name)}\s*\[\s*{re.escape(column_name)}\s*\]',
+                        rf'(?<!\w)\[\s*{re.escape(column_name)}\s*\]' if search_table.Name == table_name else None
+                    ]
+                    
+                    for pattern in column_patterns:
+                        if pattern and re.search(pattern, calc_column.Expression):
+                            dependencies["dependent_calculated_columns"].append({
+                                "table": search_table.Name,
+                                "column": calc_column.Name,
+                                "expression": calc_column.Expression[:200] + "..." if len(calc_column.Expression) > 200 else calc_column.Expression,
+                                "impact": "Calculated column expression references this column"
+                            })
+                            break
+        
+        # Check relationships involving this column
+        for relationship in self.model.Relationships:
+            if ((relationship.FromTable.Name.lower() == table_name.lower() and 
+                 relationship.FromColumn.Name.lower() == column_name.lower()) or
+                (relationship.ToTable.Name.lower() == table_name.lower() and 
+                 relationship.ToColumn.Name.lower() == column_name.lower())):
+                dependencies["dependent_relationships"].append({
+                    "name": relationship.Name,
+                    "from_table": relationship.FromTable.Name,
+                    "from_column": relationship.FromColumn.Name,
+                    "to_table": relationship.ToTable.Name,
+                    "to_column": relationship.ToColumn.Name,
+                    "is_active": relationship.IsActive,
+                    "impact": "Relationship uses this column"
+                })
+        
+        # Check if column is used in sort by relationships
+        for search_table in self.model.Tables:
+            for other_column in search_table.Columns:
+                if hasattr(other_column, 'SortByColumn') and other_column.SortByColumn:
+                    if (other_column.SortByColumn.Table.Name.lower() == table_name.lower() and
+                        other_column.SortByColumn.Name.lower() == column_name.lower()):
+                        dependencies["dependent_calculated_columns"].append({
+                            "table": search_table.Name,
+                            "column": other_column.Name,
+                            "expression": f"SortBy: {table_name}[{column_name}]",
+                            "impact": "Column uses this column for sorting"
+                        })
+        
+        return dependencies
+
+    def _analyze_measure_dependencies(self, table_name: str, measure_name: str, dependencies: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze dependencies for a measure."""
+        table = next((t for t in self.model.Tables if t.Name.lower() == table_name.lower()), None)
+        if not table:
+            raise Exception(f"Table '{table_name}' not found.")
+        
+        measure = next((m for m in table.Measures if m.Name.lower() == measure_name.lower()), None)
+        if not measure:
+            raise Exception(f"Measure '{measure_name}' not found in table '{table_name}'.")
+        
+        # Check other measures that reference this measure
+        for search_table in self.model.Tables:
+            for other_measure in search_table.Measures:
+                if other_measure.Name != measure_name and other_measure.Expression:
+                    # Look for [MeasureName] references
+                    if re.search(rf'(?<!\w)\[\s*{re.escape(measure_name)}\s*\]', other_measure.Expression):
+                        dependencies["dependent_measures"].append({
+                            "table": search_table.Name,
+                            "measure": other_measure.Name,
+                            "expression": other_measure.Expression[:200] + "..." if len(other_measure.Expression) > 200 else other_measure.Expression,
+                            "impact": "DAX expression references this measure"
+                        })
+        
+        # Check calculated columns that reference this measure
+        for search_table in self.model.Tables:
+            for calc_column in search_table.Columns:
+                if hasattr(calc_column, 'Expression') and calc_column.Expression:
+                    if re.search(rf'(?<!\w)\[\s*{re.escape(measure_name)}\s*\]', calc_column.Expression):
+                        dependencies["dependent_calculated_columns"].append({
+                            "table": search_table.Name,
+                            "column": calc_column.Name,
+                            "expression": calc_column.Expression[:200] + "..." if len(calc_column.Expression) > 200 else calc_column.Expression,
+                            "impact": "Calculated column expression references this measure"
+                        })
+        
+        return dependencies
+
+    def _calculate_risk_level(self, dependencies: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate risk level and provide recommendations based on dependencies."""
+        total_affected = (len(dependencies["dependent_measures"]) + 
+                         len(dependencies["dependent_calculated_columns"]) + 
+                         len(dependencies["dependent_relationships"]) + 
+                         len(dependencies["dependent_table_security_roles"]))
+        
+        dependencies["impact_summary"]["total_objects_affected"] = total_affected
+        
+        # Determine risk level
+        if total_affected == 0:
+            dependencies["impact_summary"]["risk_level"] = "NONE"
+            dependencies["impact_summary"]["recommendations"] = [
+                "✅ Safe to rename - no dependencies found"
+            ]
+        elif total_affected <= 5:
+            dependencies["impact_summary"]["risk_level"] = "LOW"
+            dependencies["impact_summary"]["recommendations"] = [
+                "⚠️ Low risk - few dependencies found",
+                "Review dependent objects before proceeding",
+                "Consider testing in development environment first"
+            ]
+        elif total_affected <= 15:
+            dependencies["impact_summary"]["risk_level"] = "MEDIUM"
+            dependencies["impact_summary"]["recommendations"] = [
+                "⚠️ Medium risk - multiple dependencies found",
+                "Carefully review all dependent DAX expressions",
+                "Test thoroughly in development environment",
+                "Consider notifying downstream users"
+            ]
+        else:
+            dependencies["impact_summary"]["risk_level"] = "HIGH"
+            dependencies["impact_summary"]["recommendations"] = [
+                "🚨 High risk - many dependencies found",
+                "Plan rename operation carefully",
+                "Create backup before proceeding",
+                "Test extensively in development environment",
+                "Coordinate with all stakeholders",
+                "Consider phased rollout approach"
+            ]
+        
+        return dependencies
+
+    def safe_rename_with_dependencies(self, object_type: str, old_name: str, new_name: str, 
+                                    table_name: str = None, confirmed: bool = False) -> Dict[str, Any]:
+        """
+        Safely rename an object (table, column, or measure) and update all dependencies.
+        
+        Args:
+            object_type: Type of object ('table', 'column', 'measure')
+            old_name: Current name of the object
+            new_name: New name for the object
+            table_name: Name of the table (required for column and measure)
+            confirmed: Whether user has confirmed the operation
+            
+        Returns:
+            Dictionary with operation results
+        """
+        if not self.connected:
+            raise Exception("Tabular server is not connected.")
+        
+        try:
+            # First, analyze dependencies
+            dependencies = self.analyze_dependencies(object_type, old_name, table_name)
+            
+            result = {
+                "operation": f"Rename {object_type} '{old_name}' to '{new_name}'",
+                "dependencies_analyzed": dependencies,
+                "confirmation_required": not confirmed,
+                "updates_performed": [],
+                "status": "pending_confirmation"
+            }
+            
+            # If not confirmed, return dependency analysis for user review
+            if not confirmed:
+                result["message"] = "⚠️ Please review dependencies and confirm the operation"
+                result["next_steps"] = [
+                    "Review the dependency analysis carefully",
+                    "Ensure all affected objects are acceptable to modify", 
+                    "Call this function again with confirmed=True to proceed"
+                ]
+                return result
+            
+            # User confirmed - proceed with rename operation
+            result["status"] = "executing"
+            
+            if object_type.lower() == "table":
+                rename_result = self._safe_rename_table(old_name, new_name, dependencies)
+            elif object_type.lower() == "column":
+                rename_result = self._safe_rename_column(table_name, old_name, new_name, dependencies)
+            elif object_type.lower() == "measure":
+                rename_result = self._safe_rename_measure(table_name, old_name, new_name, dependencies)
+            else:
+                raise Exception(f"Unsupported object type: {object_type}")
+            
+            result.update(rename_result)
+            result["status"] = "completed"
+            
+            logger.info(f"Successfully renamed {object_type} '{old_name}' to '{new_name}' with {len(result['updates_performed'])} dependency updates")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to safely rename {object_type}: {e}")
+            raise Exception(f"Failed to safely rename {object_type}: {e}")
+
+    def _safe_rename_table(self, old_name: str, new_name: str, dependencies: Dict[str, Any]) -> Dict[str, Any]:
+        """Safely rename a table and update all dependencies."""
+        # Find and rename the table
+        table = next((t for t in self.model.Tables if t.Name.lower() == old_name.lower()), None)
+        if not table:
+            raise Exception(f"Table '{old_name}' not found.")
+        
+        if any(t.Name.lower() == new_name.lower() for t in self.model.Tables):
+            raise Exception(f"A table named '{new_name}' already exists.")
+        
+        updates_performed = []
+        
+        # Update dependent measures
+        for measure_dep in dependencies["dependent_measures"]:
+            measure_table = next((t for t in self.model.Tables if t.Name == measure_dep["table"]), None)
+            if measure_table:
+                measure = next((m for m in measure_table.Measures if m.Name == measure_dep["measure"]), None)
+                if measure and measure.Expression:
+                    old_expression = measure.Expression
+                    new_expression = re.sub(rf'\b{re.escape(old_name)}\s*\[', f"{new_name}[", old_expression)
+                    measure.Expression = new_expression
+                    updates_performed.append(f"Updated measure {measure_table.Name}[{measure.Name}]")
+        
+        # Update dependent calculated columns
+        for column_dep in dependencies["dependent_calculated_columns"]:
+            calc_table = next((t for t in self.model.Tables if t.Name == column_dep["table"]), None)
+            if calc_table:
+                calc_column = next((c for c in calc_table.Columns if c.Name == column_dep["column"]), None)
+                if calc_column and hasattr(calc_column, 'Expression') and calc_column.Expression:
+                    old_expression = calc_column.Expression
+                    new_expression = re.sub(rf'\b{re.escape(old_name)}\s*\[', f"{new_name}[", old_expression)
+                    calc_column.Expression = new_expression
+                    updates_performed.append(f"Updated calculated column {calc_table.Name}[{calc_column.Name}]")
+        
+        # Rename the table itself
+        table.Name = new_name
+        updates_performed.append(f"Renamed table '{old_name}' to '{new_name}'")
+        
+        # Save changes
+        self.model.RequestRefresh(RefreshType.Automatic)
+        self.model.SaveChanges()
+        
+        return {
+            "updates_performed": updates_performed,
+            "table_renamed": True,
+            "refresh_triggered": True
+        }
+
+    def _safe_rename_column(self, table_name: str, old_name: str, new_name: str, dependencies: Dict[str, Any]) -> Dict[str, Any]:
+        """Safely rename a column and update all dependencies."""
+        table = next((t for t in self.model.Tables if t.Name.lower() == table_name.lower()), None)
+        if not table:
+            raise Exception(f"Table '{table_name}' not found.")
+        
+        column = next((c for c in table.Columns if c.Name.lower() == old_name.lower()), None)
+        if not column:
+            raise Exception(f"Column '{old_name}' not found in table '{table_name}'.")
+        
+        if any(c.Name.lower() == new_name.lower() for c in table.Columns):
+            raise Exception(f"A column named '{new_name}' already exists in table '{table_name}'.")
+        
+        updates_performed = []
+        
+        # Update dependent measures
+        for measure_dep in dependencies["dependent_measures"]:
+            measure_table = next((t for t in self.model.Tables if t.Name == measure_dep["table"]), None)
+            if measure_table:
+                measure = next((m for m in measure_table.Measures if m.Name == measure_dep["measure"]), None)
+                if measure and measure.Expression:
+                    old_expression = measure.Expression
+                    # Update both Table[Column] and [Column] patterns
+                    new_expression = re.sub(rf'\b{re.escape(table_name)}\s*\[\s*{re.escape(old_name)}\s*\]', 
+                                          f"{table_name}[{new_name}]", old_expression)
+                    if measure_table.Name == table_name:
+                        new_expression = re.sub(rf'(?<!\w)\[\s*{re.escape(old_name)}\s*\]', 
+                                              f"[{new_name}]", new_expression)
+                    measure.Expression = new_expression
+                    updates_performed.append(f"Updated measure {measure_table.Name}[{measure.Name}]")
+        
+        # Update dependent calculated columns
+        for column_dep in dependencies["dependent_calculated_columns"]:
+            calc_table = next((t for t in self.model.Tables if t.Name == column_dep["table"]), None)
+            if calc_table:
+                calc_column = next((c for c in calc_table.Columns if c.Name == column_dep["column"]), None)
+                if calc_column and hasattr(calc_column, 'Expression') and calc_column.Expression:
+                    old_expression = calc_column.Expression
+                    new_expression = re.sub(rf'\b{re.escape(table_name)}\s*\[\s*{re.escape(old_name)}\s*\]', 
+                                          f"{table_name}[{new_name}]", old_expression)
+                    if calc_table.Name == table_name:
+                        new_expression = re.sub(rf'(?<!\w)\[\s*{re.escape(old_name)}\s*\]', 
+                                              f"[{new_name}]", new_expression)
+                    calc_column.Expression = new_expression
+                    updates_performed.append(f"Updated calculated column {calc_table.Name}[{calc_column.Name}]")
+        
+        # Update relationships (will be handled automatically by the server when column is renamed)
+        
+        # Rename the column itself
+        column.Name = new_name
+        updates_performed.append(f"Renamed column '{table_name}[{old_name}]' to '{table_name}[{new_name}]'")
+        
+        # Save changes
+        self.model.RequestRefresh(RefreshType.Automatic)
+        self.model.SaveChanges()
+        
+        return {
+            "updates_performed": updates_performed,
+            "column_renamed": True,
+            "refresh_triggered": True
+        }
+
+    def _safe_rename_measure(self, table_name: str, old_name: str, new_name: str, dependencies: Dict[str, Any]) -> Dict[str, Any]:
+        """Safely rename a measure and update all dependencies."""
+        table = next((t for t in self.model.Tables if t.Name.lower() == table_name.lower()), None)
+        if not table:
+            raise Exception(f"Table '{table_name}' not found.")
+        
+        measure = next((m for m in table.Measures if m.Name.lower() == old_name.lower()), None)
+        if not measure:
+            raise Exception(f"Measure '{old_name}' not found in table '{table_name}'.")
+        
+        if any(m.Name.lower() == new_name.lower() for m in table.Measures):
+            raise Exception(f"A measure named '{new_name}' already exists in table '{table_name}'.")
+        
+        updates_performed = []
+        
+        # Update dependent measures
+        for measure_dep in dependencies["dependent_measures"]:
+            dep_table = next((t for t in self.model.Tables if t.Name == measure_dep["table"]), None)
+            if dep_table:
+                dep_measure = next((m for m in dep_table.Measures if m.Name == measure_dep["measure"]), None)
+                if dep_measure and dep_measure.Expression:
+                    old_expression = dep_measure.Expression
+                    new_expression = re.sub(rf'(?<!\w)\[\s*{re.escape(old_name)}\s*\]', 
+                                          f"[{new_name}]", old_expression)
+                    dep_measure.Expression = new_expression
+                    updates_performed.append(f"Updated measure {dep_table.Name}[{dep_measure.Name}]")
+        
+        # Update dependent calculated columns
+        for column_dep in dependencies["dependent_calculated_columns"]:
+            calc_table = next((t for t in self.model.Tables if t.Name == column_dep["table"]), None)
+            if calc_table:
+                calc_column = next((c for c in calc_table.Columns if c.Name == column_dep["column"]), None)
+                if calc_column and hasattr(calc_column, 'Expression') and calc_column.Expression:
+                    old_expression = calc_column.Expression
+                    new_expression = re.sub(rf'(?<!\w)\[\s*{re.escape(old_name)}\s*\]', 
+                                          f"[{new_name}]", old_expression)
+                    calc_column.Expression = new_expression
+                    updates_performed.append(f"Updated calculated column {calc_table.Name}[{calc_column.Name}]")
+        
+        # Rename the measure itself
+        measure.Name = new_name
+        updates_performed.append(f"Renamed measure '{table_name}[{old_name}]' to '{table_name}[{new_name}]'")
+        
+        # Save changes
+        self.model.SaveChanges()
+        
+        return {
+            "updates_performed": updates_performed,
+            "measure_renamed": True,
+            "refresh_triggered": False
+        }
+
     def get_table_properties(self, table_name: str) -> Dict[str, Any]:
         """
         Get all available properties for a specific table with their current values and metadata.
@@ -2559,31 +2896,8 @@ class PowerBIMCPServer:
                     "required": ["table_name","measure_name","dax_expression"]
                 }
             ),
-            Tool(
-                name="update_column_names",
-                description="Update column names in the model.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "table_name": {"type": "string"},
-                        "old_col_name": {"type": "string"},
-                        "new_col_name": {"type": "string"}
-                    },
-                    "required": ["table_name","old_col_name","new_col_name"]
-                }
-            ),Tool(
-                name="update_table_name",
-                description="Update table names in the model.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "old_table_name": {"type": "string"},
-                        "new_table_name": {"type": "string"},
-                        "confirm": {"type": "boolean"}
-                    },
-                    "required": ["old_table_name","new_table_name"]
-                }
-            ),
+            # REMOVED: update_column_names tool - use safe_rename_with_dependencies instead
+            # REMOVED: update_table_name tool - use safe_rename_with_dependencies instead
             Tool(
                 name="execute_sql_query",
                 description="Execute a SQL query against the database.",
@@ -2671,10 +2985,18 @@ class PowerBIMCPServer:
             ),
             Tool(
                 name="create_lakehouse_shortcut",
-                description="Create a lakehouse shortcut with MCP elicitation for approval.",
+                description="Create a lakehouse shortcut automatically once all required parameters are provided.",
                 inputSchema={
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "target_workspace": {"type": "string", "description": "Name or ID of the target workspace"},
+                        "target_lakehouse": {"type": "string", "description": "Name or ID of the target lakehouse"},
+                        "target_shortcut_path": {"type": "string", "description": "Path in target lakehouse (e.g., 'Tables' or 'Files/folder')"},
+                        "target_shortcut_name": {"type": "string", "description": "Name for the shortcut"},
+                        "source_workspace": {"type": "string", "description": "Name or ID of the source workspace"},
+                        "source_lakehouse": {"type": "string", "description": "Name or ID of the source lakehouse"},
+                        "source_path": {"type": "string", "description": "Path in source lakehouse (e.g., 'Tables/table_name' or 'Files/folder')"}
+                    },
                     "required": []
                 }
             ),
@@ -2970,6 +3292,59 @@ class PowerBIMCPServer:
                     "properties": {},
                     "required": []
                 }
+            ),
+            Tool(
+                name="analyze_dependencies",
+                description="Analyze dependencies for a given object (table, column, or measure) before renaming to understand impact.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "object_type": {
+                            "type": "string",
+                            "description": "Type of object to analyze ('table', 'column', 'measure')"
+                        },
+                        "object_name": {
+                            "type": "string", 
+                            "description": "Name of the object to analyze"
+                        },
+                        "table_name": {
+                            "type": "string",
+                            "description": "Name of the table (required for column and measure analysis)"
+                        }
+                    },
+                    "required": ["object_type", "object_name"]
+                }
+            ),
+            Tool(
+                name="safe_rename_with_dependencies",
+                description="Safely rename an object (table, column, or measure) with dependency checking and user confirmation workflow.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "object_type": {
+                            "type": "string",
+                            "description": "Type of object to rename ('table', 'column', 'measure')"
+                        },
+                        "old_name": {
+                            "type": "string",
+                            "description": "Current name of the object"
+                        },
+                        "new_name": {
+                            "type": "string",
+                            "description": "New name for the object"
+                        },
+                        "table_name": {
+                            "type": "string",
+                            "description": "Name of the table (required for column and measure)"
+                        },
+                        "confirmed": {
+                            "type": "boolean",
+                            "description": "Set to True to confirm the operation after reviewing dependencies",
+                            "default": False
+                        }
+                    },
+                    "required": ["object_type", "old_name", "new_name"]
+                }
             )
         ]
         @self.server.call_tool()
@@ -3010,10 +3385,7 @@ class PowerBIMCPServer:
                     result = await self._handle_create_measure(arguments)
                 elif name == "list_all_relationships":
                     result = await self._handle_list_all_relationships(arguments)  
-                elif name == "update_column_names":
-                    result = await self._handle_update_column_names(arguments)
-                elif name == "update_table_name":
-                    result = await self._handle_update_table_name(arguments)
+                # REMOVED: update_column_names and update_table_name handlers - use safe_rename_with_dependencies instead
                 elif name == "create_relationship":
                     result = await self._handle_create_relationship(arguments)
                 elif name == "create_table_security_role":
@@ -3042,6 +3414,10 @@ class PowerBIMCPServer:
                     result = await self._handle_add_measure_annotations(arguments)
                 elif name == "classify_all_measures_in_model":
                     result = await self._handle_classify_all_measures_in_model(arguments)
+                elif name == "analyze_dependencies":
+                    result = await self._handle_analyze_dependencies(arguments)
+                elif name == "safe_rename_with_dependencies":
+                    result = await self._handle_safe_rename_with_dependencies(arguments)
                 else:
                     logger.warning(f"Unknown tool: {name}")
                     return [TextContent(type="text", text=f"Unknown tool: {name}")]
@@ -3275,42 +3651,10 @@ class PowerBIMCPServer:
             logger.error(f"Connection failed: {str(e)}")
             return f"Connection failed: {str(e)}"
 
-    async def _handle_update_table_name(self, arguments: Dict[str, Any]) -> str:
-        """Handle update of table name in Power BI dataset"""
-        try:
-            with self.connection_lock:
-                # Connect to Power BI
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    self.tabular_editor.refresh_semantic_model,
-                    arguments["old_table_name"],
-                    arguments["new_table_name"],
-                    arguments["confirm"]
-                )
-                return str(result)
-                
-        except Exception as e:
-            logger.error(f"Connection failed: {str(e)}")
-            return f"Connection failed: {str(e)}"
+    # REMOVED: _handle_update_table_name and _handle_update_column_names
+    # These functions were redundant as safe_rename_with_dependencies provides
+    # comprehensive dependency checking and safe renaming
 
-    async def _handle_update_column_names(self, arguments: Dict[str, Any]) -> str:
-        """Handle update of column names in Power BI dataset"""
-        try:
-            with self.connection_lock:
-                # Connect to Power BI
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    self.tabular_editor.refresh_semantic_model,
-                    arguments["table_name"],
-                    arguments["new_col_name"],
-                    arguments["old_col_name"]
-                )
-                return str(result)
-                
-        except Exception as e:
-            logger.error(f"Connection failed: {str(e)}")
-            return f"Connection failed: {str(e)}"
-    
     async def _handle_disconnect_dataset(self, arguments: Dict[str, Any]) -> str:
         """Handle disconnection from Power BI dataset"""
         try:
@@ -3428,19 +3772,15 @@ class PowerBIMCPServer:
         """Handle creation of lakehouse shortcut with approval elicitation"""
         try:
             with self.connection_lock:
-                # Call the unified method with all parameters including approved, using get to handle optional parameters
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: asyncio.run(self.fabric.create_lakehouse_shortcut(
-                        arguments.get("target_workspace"),
-                        arguments.get("target_lakehouse"),
-                        arguments.get("target_shortcut_path"),
-                        arguments.get("target_shortcut_name"),
-                        arguments.get("source_workspace"),
-                        arguments.get("source_lakehouse"),
-                        arguments.get("source_path"),
-                        arguments.get("approved", False)
-                    ))
+                # Call the unified method with all parameters directly since it's already async
+                result = await self.fabric.create_lakehouse_shortcut(
+                    arguments.get("target_workspace"),
+                    arguments.get("target_lakehouse"),
+                    arguments.get("target_shortcut_path"),
+                    arguments.get("target_shortcut_name"),
+                    arguments.get("source_workspace"),
+                    arguments.get("source_lakehouse"),
+                    arguments.get("source_path")
                 )
                 
                 return json.dumps(result)
@@ -3606,6 +3946,42 @@ class PowerBIMCPServer:
         except Exception as e:
             logger.error(f"Error classifying all measures: {str(e)}")
             return f"Error classifying all measures: {str(e)}"
+    
+    async def _handle_analyze_dependencies(self, arguments: Dict[str, Any]) -> str:
+        """Handle dependency analysis for an object before renaming"""
+        try:
+            with self.connection_lock:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.tabular_editor.analyze_dependencies,
+                    arguments["object_type"],
+                    arguments["object_name"],
+                    arguments.get("table_name")
+                )
+                return json.dumps(result, indent=2)
+                
+        except Exception as e:
+            logger.error(f"Error analyzing dependencies: {str(e)}")
+            return f"Error analyzing dependencies: {str(e)}"
+    
+    async def _handle_safe_rename_with_dependencies(self, arguments: Dict[str, Any]) -> str:
+        """Handle safe renaming with dependency checking and user confirmation"""
+        try:
+            with self.connection_lock:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.tabular_editor.safe_rename_with_dependencies,
+                    arguments["object_type"],
+                    arguments["old_name"],
+                    arguments["new_name"],
+                    arguments.get("table_name"),
+                    arguments.get("confirmed", False)
+                )
+                return json.dumps(result, indent=2)
+                
+        except Exception as e:
+            logger.error(f"Error in safe rename operation: {str(e)}")
+            return f"Error in safe rename operation: {str(e)}"
     
     async def run(self):
         """Run the MCP server"""
