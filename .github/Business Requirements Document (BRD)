@@ -1,9 +1,8 @@
 ### Lakehouse Creation
-- Create BilledPipelineLH_Demo lakehouse in OCT-Dev workspace.
-- Get the Lakehouse Info and Connect to the SQL endpoint and Database.
+- Create BilledPipelineLH_vare lakehouse in OCT-Dev workspace.
 
-### Shortcuts Creation
-- Consider the MSBilledPipelineLH lakehouse from MSXI-BilledPipeline02 workspace and get the below source tables and create shortcuts in OCT-Dev Workspace and BilledPipelineLH_Demo Lakehouse, Auto Approve it.
+### Shortcuts Creations
+- Create shortcuts by considering the MSBilledPipelineLH lakehouse from MSXI-BilledPipeline02 workspace and get the below source tables and create shortcuts in OCT-Dev Workspace and BilledPipelineLH_vare Lakehouse.
 source tables:
 ext_factsoftwarepipeline
 ext_dimsalesdate
@@ -12,19 +11,31 @@ ext_dimpricinglevel
 ext_sec_userbusiness
 ext_dimbusiness
 ext_dimproduct
+ext_sec_dimseller
 ext_sec_sellerhierarchy
 ext_sec_usersubsidiary
 
-### Semantic Model Creation
-- Create BilledPipelineSM_Demo Semantic Model in OCT-Dev workspace using the above lakehouse & shortcuts created
-- Identify eligible date tables and set them as official date tables in the model
+- Get the Lakehouse Info and Connect to the SQL endpoint and Database.
+- Refresh the sql endpoint
+- Get the list of tables in sql endpoint
 
+### Semantic Model Creation
+- Create BilledPipelineSM_vare Semantic Model in OCT-Dev workspace using the above lakehouse & shortcuts created
+- Identify eligible date tables. 
+- Mark the date table
 ### Relationships
 - Provide a detailed description of all tables in the connected models.
 - Check each table to determine whether it contains a unique key column or the lowest-granularity column.
 - Establish the correct relationships between fact and dimension tables, and identify security-related tables in the model.
-- Implement mssales row-level security so that when a user logs in, only their respective subsidiaries are visible.
+
+### Create security tables
+1. Seller Role
+- Each user should only see sellers whose email addresses are assigned to them in the seller hierarchy mapping.
+2. Business Role
+- Each user should only see business records that are linked to them in the business hierarchy mapping.
+3. Subsidiary Role
+- Each user should only see subsidiaries that are explicitly assigned to them in the subsidiary mapping
+- The DAX expression needs fully qualified column references
 
 # KPI's & Measures
 - Create the key performance indicator measures, which can be used by the leaders and sellers.
-

@@ -6,6 +6,7 @@ from mcp.server.elicitation import AcceptedElicitation,DeclinedElicitation,Cance
 from mcp.types import Tool, TextContent
 import mcp.server.stdio
 import os
+import time
 from dotenv import load_dotenv
 import json
 import sys
@@ -27,7 +28,8 @@ import anyio
 # Setup logging with UTF-8 encoding
 import io
 import codecs
-
+# Timing constants for Fabric operations
+SHORTCUT_PROPAGATION_WAIT = 10  # seconds to wait after shortcut creation
 # Configure stdout and stderr for UTF-8 encoding
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
@@ -284,6 +286,37 @@ class Fabric:
             return response.text
         
         except Exception as e:
+            pass
+            return f"{str(e)}"
+        
+    def refresh_sql_endpoint(self, workspace_identifier: str, lakehouse_identifier: str) -> Dict[str, Any]:
+        """Refresh the SQL endpoint for a lakehouse using Fabric REST API"""
+        try:
+            if not self.access_token:
+               self.access_token = self.auth_manager.get_access_token(force_refresh=True)
+
+            sql_endpoint_id = self.get_lakehouse_info(workspace_identifier, lakehouse_identifier).get("sql_database", None)
+            workspace_id = self.get_lakehouse_info(workspace_identifier, lakehouse_identifier).get("workspace_id", None)
+            if not sql_endpoint_id:
+                raise ValueError(f"SQL Endpoint for Lakehouse '{lakehouse_identifier}' not found.")
+
+            endpoint = f"https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/sqlEndpoints/{sql_endpoint_id}/refreshMetadata"
+
+            body = {
+                "sqlEndpointId": sql_endpoint_id,
+                "workspaceId": workspace_id
+            }
+
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json"
+            }
+
+            response = requests.post(endpoint, headers=headers, json=body)
+            return response.text
+        
+        except Exception as e:
+            pass
             return f"{str(e)}"
 
     async def create_lakehouse_shortcut(self, target_workspace: str = None, target_lakehouse: str = None, target_shortcut_path: str = None, target_shortcut_name: str = None, source_workspace: str = None, source_lakehouse: str = None, source_path: str = None) -> dict:
@@ -292,19 +325,19 @@ class Fabric:
             # If no parameters provided, return elicitation prompt to collect all details
             if not all([target_workspace, target_lakehouse, target_shortcut_path, target_shortcut_name, source_workspace, source_lakehouse, source_path]):
                 collection_prompt = """
-Create Lakehouse Shortcut
+    Create Lakehouse Shortcut
 
-Please provide the following information for creating the lakehouse shortcut:
+    Please provide the following information for creating the lakehouse shortcut:
 
-1. Target Workspace: Name or ID of the target workspace
-2. Target Lakehouse: Name or ID of the target lakehouse  
-3. Target Shortcut Path: Path in target lakehouse (e.g., 'Tables' or 'Files/folder')
-4. Target Shortcut Name: Name for the shortcut
-5. Source Workspace: Name or ID of the source workspace
-6. Source Lakehouse: Name or ID of the source lakehouse
-7. Source Path: Path in source lakehouse (e.g., 'Tables/table_name' or 'Files/folder')
+    1. Target Workspace: Name or ID of the target workspace
+    2. Target Lakehouse: Name or ID of the target lakehouse  
+    3. Target Shortcut Path: Path in target lakehouse (e.g., 'Tables' or 'Files/folder')
+    4. Target Shortcut Name: Name for the shortcut
+    5. Source Workspace: Name or ID of the source workspace
+    6. Source Lakehouse: Name or ID of the source lakehouse
+    7. Source Path: Path in source lakehouse (e.g., 'Tables/table_name' or 'Files/folder')
 
-The shortcut will be created automatically once all details are provided.
+    The shortcut will be created automatically once all details are provided.
                 """
 
                 return {
@@ -377,13 +410,21 @@ The shortcut will be created automatically once all details are provided.
             response = requests.post(url, headers=headers, json=request_body, timeout=30)
 
             if response.status_code == 201:
+                logger.info("✅ Shortcut created successfully, waiting for propagation...")
+                
+                # Add sleep here for shortcut propagation
+                time.sleep(SHORTCUT_PROPAGATION_WAIT)  # Wait for shortcut to propagate to SQL endpoint
+                logger.info("⏳ Shortcut propagation wait completed")
+                
+                # Optionally refresh the target lakehouse after shortcut creation
                 return {
                     "success": "Shortcut created successfully", 
                     "response": response.json(),
                     "shortcut_details": {
                         "source": f"{source_workspace_name}/{source_lakehouse_name}/{source_path}",
                         "target": f"{target_workspace_name}/{target_lakehouse_name}/{target_shortcut_path}/{target_shortcut_name}"
-                    }
+                    },
+                    "propagation_wait": f"{SHORTCUT_PROPAGATION_WAIT} seconds applied"  # Add this to indicate wait was applied
                 }
             else:
                 return {"error": f"Failed to create shortcut: {response.status_code} - {response.text}"}
@@ -539,9 +580,10 @@ class TabularEditor:
         }
     
     def create_semantic_model(self, workspace_identifier: str, lakehouse_identifier:str ,semantic_model_name: str, selected_tables: List[str] = None, description: str = None) -> Dict[str, Any]:
-        """Create a comprehensive DirectLake semantic model using TMSL for full DAX Studio and XMLA support with automatic refresh"""    
+        """Create a comprehensive DirectLake semantic model using TMSL for full DAX Studio and XMLA support with automatic refresh"""
+        
         try:
-            # Debug: Log input parameters
+    
             debug_start = {
                 "workspace_identifier": workspace_identifier,
                 "lakehouse_identifier": lakehouse_identifier,
@@ -549,17 +591,8 @@ class TabularEditor:
                 "selected_tables": selected_tables,
                 "description": description
             }
-            print("="*80)
-            print("🚀 SEMANTIC MODEL CREATION - STEP BY STEP")
-            print("="*80)
-            print(f"📋 Parameters: workspace={workspace_identifier}, lakehouse={lakehouse_identifier}, model={semantic_model_name}, tables={selected_tables}")
-            
-            print("📍 STEP 1: Getting lakehouse info...")
-            logger.info("="*80)
-            logger.info("🚀 SEMANTIC MODEL CREATION - STEP BY STEP")
-            logger.info("="*80)
+           
             logger.info(f"📋 Parameters: workspace={workspace_identifier}, lakehouse={lakehouse_identifier}, model={semantic_model_name}, tables={selected_tables}")
-            
             logger.info("📍 STEP 1: Getting lakehouse info...")
             try:
                 lakehouse_info = self.fabric.get_lakehouse_info(workspace_identifier,lakehouse_identifier)
@@ -748,7 +781,7 @@ class TabularEditor:
             # Execute the TMSL command
             result = server.Execute(json.dumps(tmsl_create_command))
             logger.info(f"TMSL execution result: {result}")
-
+                       # Wait a moment and try to verify the model was created
             import time
             time.sleep(10)  # Give model time to be available
             server.Refresh()
@@ -758,9 +791,6 @@ class TabularEditor:
             created_model = server.Databases.Find(semantic_model_name)
             if created_model:
                 logger.info(f"Successfully verified model '{semantic_model_name}' was created")
-            self.model = created_model.Model
-            self.connected = True
-            logger.info("Disconnected from Analysis Services")
             
             # Prepare the result
             creation_result = {
@@ -769,7 +799,7 @@ class TabularEditor:
                 "workspace_name": workspace_name,
                 "model_name": semantic_model_name,
                 "tables_added": [table['name'] for table in tmsl_tables],
-                "total_tables": len(tmsl_tables)
+                "total_tables": len(tmsl_tables),
             }
             self.refresh_semantic_model(workspace_id, semantic_model_name)
             return creation_result
@@ -2956,6 +2986,18 @@ class PowerBIMCPServer:
                 }
             ),
             Tool(
+                name="refresh_sql_endpoint",
+                description="Refresh the metadata of a SQL endpoint.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "workspace_identifier": {"type": "string"},
+                        "lakehouse_identifier": {"type": "string"}
+                    },
+                    "required": ["workspace_identifier", "lakehouse_identifier"]
+                }
+            ),
+            Tool(
                 name="create_table_security_role",
                 description="Create a new table security role.",
                 inputSchema={
@@ -3418,6 +3460,8 @@ class PowerBIMCPServer:
                     result = await self._handle_analyze_dependencies(arguments)
                 elif name == "safe_rename_with_dependencies":
                     result = await self._handle_safe_rename_with_dependencies(arguments)
+                elif name == "refresh_sql_endpoint":
+                    result = await self._handle_refresh_sql_endpoint(arguments)
                 else:
                     logger.warning(f"Unknown tool: {name}")
                     return [TextContent(type="text", text=f"Unknown tool: {name}")]
@@ -3445,7 +3489,7 @@ class PowerBIMCPServer:
         except Exception as e:
             logger.error(f"Connection failed: {str(e)}")
             return f"Connection failed: {str(e)}"
-
+        
     async def _handle_create_relationship(self, arguments: Dict[str, Any]) -> str:
         """Handle creation of a new relationship"""
         try:
@@ -3541,6 +3585,23 @@ class PowerBIMCPServer:
                     None,
                     self.tabular_editor.execute_dax_query,
                     arguments["dax_query"]
+                )
+                return str(result)
+
+        except Exception as e:
+            logger.error(f"Connection failed: {str(e)}")
+            return f"Connection failed: {str(e)}"
+
+    async def _handle_refresh_sql_endpoint(self, arguments: Dict[str, Any]) -> str:
+        """Handle refresh of SQL endpoint"""
+        try:
+            with self.connection_lock:
+                # Connect to Power BI
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.fabric.refresh_sql_endpoint,
+                    arguments["workspace_identifier"],
+                    arguments["lakehouse_identifier"]
                 )
                 return str(result)
 
@@ -3738,18 +3799,18 @@ class PowerBIMCPServer:
 
     async def _handle_create_semantic_model(self, arguments: Dict[str, Any]) -> str:
         """Handle creation of semantic model"""
-        print("🔥 HANDLER CALLED - _handle_create_semantic_model")
-        logger.info("🔥 HANDLER CALLED - _handle_create_semantic_model")
+        print("HANDLER CALLED - _handle_create_semantic_model")
+        logger.info("HANDLER CALLED - _handle_create_semantic_model")
         try:
-            print(f"🔥 Handler received arguments: {arguments}")
-            logger.info(f"🔥 Handler received arguments: {arguments}")
+            print(f"Handler received arguments: {arguments}")
+            logger.info(f"Handler received arguments: {arguments}")
             selected_tables = arguments.get("selected_tables")
-            print(f"🔥 Extracted selected_tables: {selected_tables}, type: {type(selected_tables)}")
-            logger.info(f"🔥 Extracted selected_tables: {selected_tables}, type: {type(selected_tables)}")
+            print(f"Extracted selected_tables: {selected_tables}, type: {type(selected_tables)}")
+            logger.info(f"Extracted selected_tables: {selected_tables}, type: {type(selected_tables)}")
             
             with self.connection_lock:
-                print("🔥 About to call tabular_editor.create_semantic_model")
-                logger.info("🔥 About to call tabular_editor.create_semantic_model")
+                print("About to call tabular_editor.create_semantic_model")
+                logger.info("About to call tabular_editor.create_semantic_model")
                 result = await asyncio.get_event_loop().run_in_executor(
                     None,
                     self.tabular_editor.create_semantic_model,
@@ -3759,13 +3820,13 @@ class PowerBIMCPServer:
                     selected_tables,
                     arguments.get("description")
                 )
-                print(f"🔥 Result from create_semantic_model: {result}")
-                logger.info(f"🔥 Result from create_semantic_model: {result}")
+                print(f"Result from create_semantic_model: {result}")
+                logger.info(f"Result from create_semantic_model: {result}")
                 return json.dumps(result)
 
         except Exception as e:
-            print(f"🔥 ERROR in handler: {str(e)}")
-            logger.error(f"🔥 ERROR in handler: {str(e)}")
+            print(f"ERROR in handler: {str(e)}")
+            logger.error(f"ERROR in handler: {str(e)}")
             return f"Error creating semantic model: {str(e)}"
 
     async def _handle_create_lakehouse_shortcut(self, arguments: Dict[str, Any]) -> str:
