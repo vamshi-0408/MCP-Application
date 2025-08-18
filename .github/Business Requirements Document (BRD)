@@ -14,6 +14,7 @@ ext_dimproduct
 ext_sec_dimseller
 ext_sec_sellerhierarchy
 ext_sec_usersubsidiary
+ext_dimaccountgeography
 
 - Get the Lakehouse Info and Connect to the SQL endpoint and Database.
 - Refresh the sql endpoint
@@ -23,19 +24,18 @@ ext_sec_usersubsidiary
 - Create BilledPipelineSM_vare Semantic Model in OCT-Dev workspace using the above lakehouse & shortcuts created
 - Identify eligible date tables. 
 - Mark the date table
+
 ### Relationships
 - Provide a detailed description of all tables in the connected models.
 - Check each table to determine whether it contains a unique key column or the lowest-granularity column.
 - Establish the correct relationships between fact and dimension tables, and identify security-related tables in the model.
 
 ### Create security tables
-1. Seller Role
-- Each user should only see sellers whose email addresses are assigned to them in the seller hierarchy mapping.
-2. Business Role
-- Each user should only see business records that are linked to them in the business hierarchy mapping.
-3. Subsidiary Role
-- Each user should only see subsidiaries that are explicitly assigned to them in the subsidiary mapping
-- The DAX expression needs fully qualified column references
+1. User Subsidiary Role: 
+- Identify the User Subsidiary table in semantic model.
+- Add permission to show only user related subidiaries
+- Verify the Security Behavior Relationship with fact tables. 
+- Add the Security role as needed.
 
 # KPI's & Measures
 - Create the key performance indicator measures, which can be used by the leaders and sellers.

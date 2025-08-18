@@ -1046,7 +1046,7 @@ class TabularEditor:
         return {"relationships": relationships, "count": len(relationships)}
     
     def add_directlake_table(self, source_table: str, table_name: Optional[str] = None) -> str:
-        """Add a DirectLake table to the model using SQL endpoint schema and auto-refresh."""
+        """Add a DirectLake table to the existing model using SQL endpoint schema and auto-refresh."""
         if not self.connected:
             raise Exception("Tabular server is not connected.")
         
@@ -1061,7 +1061,7 @@ class TabularEditor:
             logger.info(f"Starting DirectLake table creation: {table_name} from {source_table}")
             
             # First verify the source table exists in SQL endpoint
-            schema_df = self.sql_metadata.get_table_schema(source_table)
+            schema_df = self.sql_metadata.get_sql_table_schema(source_table)
             
             if schema_df.empty:
                 raise Exception(f"Source table '{source_table}' not found in lakehouse. Please verify the table name exists in the SQL endpoint.")
@@ -1160,7 +1160,15 @@ class TabularEditor:
             
             # Save columns to model
             self.model.SaveChanges()
-            self.refresh_table(table_name)
+            
+            # Refresh the newly added table
+            try:
+                new_table.RequestRefresh(RefreshType.Full)
+                self.model.SaveChanges()
+                logger.info(f"Table '{table_name}' refresh requested successfully")
+            except Exception as refresh_error:
+                logger.warning(f"Could not refresh table '{table_name}': {refresh_error}")
+            
             return f"✅ DirectLake table '{table_name}' created successfully with {len(new_table.Columns)} columns and refresh is triggered"
                 
         except Exception as e:
