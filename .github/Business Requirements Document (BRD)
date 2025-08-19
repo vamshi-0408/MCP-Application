@@ -33,10 +33,7 @@ ext_dimaccountgeography
 ### Create security tables
 1. User Subsidiary Role: 
 - Identify the User Subsidiary table in semantic model.
-- Add permission to show only user related subidiaries
-- Verify the Security Behavior Relationship with fact tables. 
-- Add the Security role as needed.
-
+- Create security table role show only Current User related subidiaries 
 # KPI's & Measures
 - Create the key performance indicator measures, which can be used by the leaders and sellers.
 - classify all measures in model
