@@ -29,7 +29,7 @@ import anyio
 import io
 import codecs
 # Timing constants for Fabric operations
-SHORTCUT_PROPAGATION_WAIT = 10  # seconds to wait after shortcut creation
+SHORTCUT_PROPAGATION_WAIT = 0  # seconds to wait after shortcut creation
 # Configure stdout and stderr for UTF-8 encoding
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')

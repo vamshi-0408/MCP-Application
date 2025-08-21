@@ -1,433 +1,321 @@
-# MCP-Application
+# MCP Power BI Server
 
-A Model Context Protocol (MCP) server for Power BI semantic model management with advanced measure classification and annotation capabilities.
+A comprehensive Model Context Protocol (MCP) server for Power BI semantic model management with advanced analytics, automated measure classification, and lakehouse integration.
 
-## Features
+## 🚀 Features
 
-- Connect to Power BI datasets via XMLA endpoints
-- Automatic measure classification based on DAX expression analysis
-- Custom annotation system for metadata management
-- Comprehensive table, column, and measure property management
-- SQL and DAX query execution
-- Relationship management
-- Date table configuration
-- Row-level security (RLS) role management
+- **Power BI Integration**: Connect to Power BI datasets via XMLA endpoints
+- **Intelligent Measure Classification**: Automatic measure classification based on DAX expression analysis
+- **Semantic Model Management**: Create and manage DirectLake semantic models
+- **Advanced Analytics**: Safe object renaming with dependency analysis
+- **Lakehouse Integration**: Full Microsoft Fabric lakehouse support with shortcuts
+- **Security Management**: Row-level security (RLS) configuration and management
+- **Query Execution**: Both DAX and SQL query execution capabilities
 
-## Automatic Measure Classification System
+## 🏗️ Architecture
 
-### Overview
-
-The application includes an intelligent measure classification system that automatically analyzes DAX expressions and assigns standardized annotations to measures. This system helps maintain consistency and provides valuable metadata for reporting and analysis.
-
-### Annotation Definitions
-
-#### 1. Custom Classification
-Categorizes measures based on their computational complexity and purpose:
-
-- **Simple measure**: Basic aggregation functions without complex logic
-  - Examples: `SUM()`, `COUNT()`, `AVERAGE()`, `MIN()`, `MAX()`, `DISTINCTCOUNT()`
-  - Characteristics: Single function, direct column references, no filters or calculations
-
-- **Calculated measure**: Measures involving mathematical operations or simple logic
-  - Examples: Division operations, basic IF statements, measure-to-measure calculations
-  - Characteristics: Uses `DIVIDE()`, mathematical operators (+, -, *, /), simple conditional logic
-
-- **Time intelligence**: Measures using time-based calculations
-  - Examples: Year-over-year comparisons, month-to-date calculations
-  - Characteristics: Uses functions like `DATEADD()`, `SAMEPERIODLASTYEAR()`, `DATESYTD()`
-
-- **Ratio/Percentage**: Measures calculating ratios, rates, or percentages
-  - Examples: Conversion rates, performance ratios, percentage calculations
-  - Characteristics: `DIVIDE()` function with ratio-indicating naming patterns
-
-- **Complex measure**: Advanced calculations with multiple functions and logic
-  - Examples: Multi-step calculations, complex filters, variable usage
-  - Characteristics: Uses `CALCULATE()`, `FILTER()`, `VAR/RETURN` patterns, multiple nested functions
-
-#### 2. Complexity Level
-Indicates the technical complexity of the measure:
-
-- **Low**: Simple, straightforward calculations
-  - Score: 0 complexity points
-  - Examples: Basic aggregations, simple divisions
-
-- **Medium**: Moderate complexity with some advanced functions
-  - Score: 1-2 complexity points
-  - Examples: Single `CALCULATE()` or `IF()` statement, simple filters
-
-- **High**: Advanced complexity with multiple functions
-  - Score: 3+ complexity points
-  - Examples: Multiple nested functions, complex variable logic, advanced filtering
-
-#### 3. Category
-Describes the functional purpose of the aggregation:
-
-- **Basic aggregation**: Sum, average, min, max operations
-- **Row count**: Count-based measures
-- **Distinct count**: Unique value counting
-- **Calculated**: Mathematical calculations and derivations
-- **Advanced calculation**: Complex multi-step calculations
-- **Time intelligence**: Time-based analytical measures
-- **Performance metric**: KPIs and performance indicators
-
-#### 4. Business Domain
-Contextual classification based on business purpose (derived from measure names):
-
-- **Sales Pipeline**: Pipeline value, deal-related measures
-- **Sales Metrics**: Deal counts, sales performance indicators
-- **Performance KPI**: Rates, percentages, performance ratios
-- **Statistical Metric**: Averages, statistical calculations
-- **Financial**: Revenue, cost, and financial measures
-- **Operational**: Process and operational metrics
-
-### Classification Algorithm
-
-The system uses a multi-step analysis approach:
-
-#### Step 1: DAX Expression Pattern Analysis
-```python
-# Simple Aggregation Detection
-simple_patterns = [
-    r'^SUM\s*\(',      # SUM functions
-    r'^COUNT\s*\(',    # COUNT functions  
-    r'^AVERAGE\s*\(',  # AVERAGE functions
-    r'^DISTINCTCOUNT\s*\(',  # DISTINCT COUNT
-]
-
-# Calculated Measure Detection
-calculated_patterns = [
-    r'DIVIDE\s*\(',           # Division operations
-    r'[\+\-\*\/]',           # Mathematical operators
-    r'\[.*\]\s*[\+\-\*\/]'   # Measure references with math
-]
-
-# Time Intelligence Detection
-time_patterns = [
-    r'DATEADD\s*\(',
-    r'SAMEPERIODLASTYEAR\s*\(',
-    r'DATESYTD\s*\(',
-    # ... additional time functions
-]
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        MCP Power BI Server                         │
+├─────────────────────────────────────────────────────────────────────┤
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────┐ │
+│  │ PowerBIMCPServer│  │ TabularEditor   │  │ AuthenticationMgr   │ │
+│  │ (Main Orchestr.)│  │ (Model Mgmt)    │  │ (Azure Auth)        │ │
+│  └─────────────────┘  └─────────────────┘  └─────────────────────┘ │
+├─────────────────────────────────────────────────────────────────────┤
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────┐ │
+│  │   SQLEndpoint   │  │     Fabric      │  │    Logging &        │ │
+│  │  (SQL Queries)  │  │ (Fabric APIs)   │  │    Threading        │ │
+│  └─────────────────┘  └─────────────────┘  └─────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-#### Step 2: Complexity Scoring
+## 🛠️ Installation
+
+### Prerequisites
+
+- Python 3.8+
+- Power BI Premium or Premium Per User license
+- Azure credentials with Power BI access
+- SQL Server Analysis Services client libraries
+
+### Setup Steps
+
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/vamshi-0408/MCP-Application.git
+   cd MCP-Application
+   ```
+
+2. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Configure environment variables**
+   ```bash
+   # Create .env file
+   USER_ID=your-azure-user@domain.com
+   PASSWORD=your-password
+   Analysis_Services_path=C:\Program Files\Microsoft SQL Server\150\SDK\Assemblies\
+   Adomd_DLL_Path=C:\Program Files\Microsoft SQL Server\150\SDK\Assemblies\
+   ```
+
+4. **Install Analysis Services libraries**
+   - Download and install SQL Server Management Studio (SSMS) or
+   - Install SQL Server Feature Pack for Analysis Services client libraries
+
+5. **Configure Azure authentication**
+   ```bash
+   az login
+   ```
+
+## 🚀 Quick Start
+
+### Basic Usage
+
 ```python
-complexity_indicators = [
-    ("CALCULATE(", 1),      # Filter context modification
-    ("FILTER(", 2),         # Advanced filtering
-    ("SUMX(", 2),          # Iterator functions
-    ("IF(", 1),            # Conditional logic
-    ("VAR ", 2),           # Variable usage
-    ("RETURN", 2),         # Variable return
-]
+# Connect to Power BI dataset
+await mcp_connect_dataset(
+    workspace_identifier="MyWorkspace",
+    database_name="SalesDataset"
+)
+
+# Execute DAX query
+result = await mcp_execute_dax_query(
+    "EVALUATE TOPN(10, Sales)"
+)
+
+# Create semantic model
+await mcp_create_semantic_model(
+    workspace_identifier="Analytics",
+    semantic_model_name="SalesAnalytics",
+    lakehouse_identifier="SalesLakehouse",
+    selected_tables=["Sales", "Products", "Customers"]
+)
+
+# Auto-classify measures
+await mcp_classify_all_measures_in_model()
 ```
 
-#### Step 3: Business Context Analysis
-- Analyzes measure names for business domain keywords
-- Applies contextual classification based on naming patterns
-- Assigns appropriate business domain annotations
+### Running the Server
 
-### Best Practices
+```bash
+# Development mode
+python src/server.py
 
-#### 1. Naming Conventions
-- Use descriptive, business-friendly measure names
-- Include context indicators in names (e.g., "Total", "Average", "Rate")
-- Avoid technical abbreviations in user-facing measures
-
-#### 2. Classification Guidelines
-- **Simple measures** should be preferred for basic aggregations
-- Use **calculated measures** for business logic that requires mathematical operations
-- Reserve **complex measures** for advanced analytical requirements
-- Implement **time intelligence** measures using DAX time functions
-
-#### 3. Annotation Management
-- Classifications are automatically updated when measures are modified
-- Manual annotations can override automatic classifications
-- Use consistent annotation values across the model
-- Regularly review and validate classifications
-
-#### 4. Performance Considerations
-- Simple measures generally perform better than complex ones
-- Minimize the use of complex filtering in measure definitions
-- Consider measure dependencies and calculation order
-- Use variables for repeated calculations within measures
-
-### Usage Examples
-
-#### Automatic Classification of All Measures
-```python
-# Classify all measures in the entire model
-result = mcp_classify_all_measures_in_model()
+# With debug logging
+PYTHONPATH=. python src/server.py --log-level DEBUG
 ```
 
-#### Manual Annotation Assignment
-```python
-# Add custom annotations to specific measures
-annotations = {
-    "Custom Classification": "Simple measure",
-    "Complexity Level": "Low", 
-    "Category": "Basic aggregation",
-    "Business Domain": "Sales Pipeline"
-}
+## 🎯 Core Capabilities
 
-result = mcp_add_measure_annotations(
-    table_name="FactSales",
-    measure_name="Total Revenue",
-    annotations=annotations
+### 1. Intelligent Measure Classification
+
+Automatically classifies measures based on DAX expressions:
+
+- **Simple measure**: Basic aggregations (SUM, COUNT, AVERAGE)
+- **Calculated measure**: Mathematical operations and simple logic
+- **Time intelligence**: Time-based calculations
+- **Complex measure**: Advanced calculations with multiple functions
+- **Ratio/Percentage**: Ratio and percentage calculations
+
+**Complexity levels**: Low, Medium, High
+**Business domains**: Sales, Finance, Operations, etc.
+
+### 2. Safe Object Renaming
+
+Comprehensive dependency analysis before renaming:
+
+```python
+# Analyze dependencies
+analysis = await mcp_analyze_dependencies(
+    object_type="table",
+    object_name="Sales"
+)
+
+# Safe rename with confirmation
+result = await mcp_safe_rename_with_dependencies(
+    object_type="table",
+    old_name="Sales",
+    new_name="SalesData",
+    confirmed=True
 )
 ```
 
-#### Bulk Classification for Table
+### 3. Lakehouse Integration
+
+Full Microsoft Fabric lakehouse support:
+
 ```python
-# Classify all measures in a specific table
-result = mcp_add_measure_annotations(
-    table_name="FactSales",
-    # No measure_name = applies to all measures in table
-    annotations=None  # Uses automatic classification
+# Create lakehouse shortcut
+await mcp_create_lakehouse_shortcut(
+    target_workspace="Analytics",
+    target_lakehouse="DataMart",
+    target_shortcut_path="Tables",
+    target_shortcut_name="SalesData",
+    source_workspace="DataWarehouse",
+    source_lakehouse="RawData",
+    source_path="Tables/sales_transactions"
 )
 ```
 
-### Classification Results
+### 4. Security Management
 
-The system provides detailed results including:
-- Number of measures processed
-- Classification summary by type
-- Detailed results for each measure
-- Annotation count and success status
-- DAX expression excerpts for reference
+Row-level security configuration:
 
-Example output:
-```json
-{
-    "tables_processed": 1,
-    "measures_processed": 16,
-    "total_annotations_added": 64,
-    "classification_summary": {
-        "Simple measure": 6,
-        "Calculated measure": 4,
-        "Complex measure": 6
-    },
-    "status": "✅ Successfully classified 16 measures"
-}
-```
-
-### Integration with Power BI
-
-The annotation system integrates seamlessly with Power BI:
-- Annotations are stored as metadata in the semantic model
-- Classifications persist through model refreshes
-- Annotations are accessible via XMLA and Analysis Services
-- Can be queried using DAX or MDX for reporting purposes
-
-### Troubleshooting
-
-#### Common Issues
-1. **Classification Accuracy**: If automatic classification seems incorrect, review DAX expression patterns
-2. **Missing Annotations**: Ensure the model connection is active and permissions are sufficient
-3. **Performance**: Large models may take time to process; consider table-by-table classification
-
-#### Validation
-- Use the measure properties tools to verify annotation assignments
-- Cross-reference classifications with actual DAX expressions
-- Test measure performance after classification to ensure accuracy
-
-## Technical Implementation Details
-
-### Core Classification Methods
-
-#### `_auto_classify_measure(measure)`
-Main classification engine that analyzes a measure and returns appropriate annotations.
-
-**Logic Flow:**
-1. Extract and normalize DAX expression
-2. Apply pattern matching for classification type
-3. Calculate complexity score
-4. Determine functional category
-5. Assign business domain based on naming
-6. Return annotation dictionary
-
-#### `_is_simple_aggregation(expression)`
-Identifies basic aggregation functions using regex patterns:
 ```python
-simple_patterns = [
-    r'^SUM\s*\(',           # Direct SUM operations
-    r'^COUNT\s*\(',         # Count operations
-    r'^COUNTROWS\s*\(',     # Row counting
-    r'^AVERAGE\s*\(',       # Average calculations
-    r'^MIN\s*\(',           # Minimum values
-    r'^MAX\s*\(',           # Maximum values
-    r'^DISTINCTCOUNT\s*\(', # Unique counting
-    r'^VALUES\s*\(',        # Value extraction
-]
+# Create RLS role
+await mcp_create_table_security_role(
+    role_name="RegionalManager",
+    table_name="Sales",
+    filter_expression="Sales[Region] = USERNAME()"
+)
 ```
 
-#### `_is_calculated_measure(expression)`
-Detects mathematical and calculated operations:
-```python
-calculated_patterns = [
-    r'DIVIDE\s*\(',                    # Division operations
-    r'[\+\-\*\/]',                     # Math operators
-    r'\[.*\]\s*[\+\-\*\/]\s*\[.*\]',  # Measure-to-measure math
-]
-```
+## 🔧 Available Tools
 
-#### `_get_complexity_level(expression)`
-Scoring system for measure complexity:
+### Core Connection
+- `connect_dataset` - Connect to Power BI dataset
+- `disconnect_dataset` - Disconnect from dataset
+- `initialize_sql_connection` - Setup SQL endpoint
 
-| Function/Pattern | Complexity Score |
-|------------------|------------------|
-| `CALCULATE()`    | +1 point |
-| `FILTER()`       | +2 points |
-| `SUMX()`/`AVERAGEX()` | +2 points |
-| `IF()`           | +1 point |
-| `SWITCH()`       | +2 points |
-| `VAR`/`RETURN`   | +2 points |
-| `RELATED()`      | +1 point |
-| `RELATEDTABLE()` | +2 points |
+### Query Execution
+- `execute_dax_query` - Execute DAX queries
+- `execute_sql_query` - Execute SQL queries
 
-**Complexity Mapping:**
-- 0 points = Low complexity
-- 1-2 points = Medium complexity  
-- 3+ points = High complexity
+### Model Management
+- `create_semantic_model` - Create DirectLake semantic models
+- `refresh_semantic_model` - Refresh semantic models
+- `list_tables` - List model tables
+- `create_relationship` - Create table relationships
 
-### API Endpoints
+### Advanced Analytics
+- `classify_all_measures_in_model` - Auto-classify measures
+- `analyze_dependencies` - Analyze object dependencies
+- `safe_rename_with_dependencies` - Safe object renaming
+- `add_measure_annotations` - Add measure metadata
 
-#### Classification Tools
+### Fabric Integration
+- `get_workspace_info` - Get workspace details
+- `get_lakehouse_info` - Get lakehouse information
+- `create_lakehouse` - Create new lakehouse
+- `create_lakehouse_shortcut` - Create OneLake shortcuts
 
-| Tool Name | Description | Parameters |
-|-----------|-------------|------------|
-| `classify_all_measures_in_model` | Auto-classify all measures | None |
-| `add_measure_annotations` | Add/update measure annotations | `table_name`, `measure_name?`, `annotations?` |
+### Security & Properties
+- `create_table_security_role` - Configure RLS
+- `get_table_properties` - Get table properties
+- `update_table_properties` - Update table properties
+- `mark_as_date_table` - Configure date tables
 
-#### Property Management Tools
+## 📊 Advanced Features
 
-| Tool Name | Description | Parameters |
-|-----------|-------------|------------|
-| `get_measure_properties` | Get measure property details | `table_name`, `measure_name` |
-| `update_measure_properties` | Update measure properties | `table_name`, `measure_name`, `properties` |
-| `get_table_properties` | Get table property details | `table_name` |
-| `update_table_properties` | Update table properties | `table_name`, `properties` |
+### Measure Classification System
 
-### Data Structures
+The system provides intelligent classification with:
 
-#### Annotation Format
-```json
-{
-    "Custom Classification": "Simple measure | Calculated measure | Complex measure | Time intelligence | Ratio/Percentage",
-    "Complexity Level": "Low | Medium | High", 
-    "Category": "Basic aggregation | Row count | Distinct count | Calculated | Advanced calculation | Time intelligence | Performance metric",
-    "Business Domain": "Sales Pipeline | Sales Metrics | Performance KPI | Statistical Metric | Financial | Operational"
-}
-```
+- **Pattern Recognition**: Analyzes DAX expressions using regex patterns
+- **Complexity Scoring**: Assigns complexity levels based on function usage
+- **Business Context**: Infers business domain from measure names
+- **Automated Annotation**: Adds standardized metadata to measures
 
-#### Classification Results Format
-```json
-{
-    "tables_processed": 1,
-    "measures_processed": 16,
-    "total_annotations_added": 64,
-    "classification_summary": {
-        "Simple measure": 6,
-        "Calculated measure": 4,
-        "Complex measure": 6
-    },
-    "details": {
-        "table_name": {
-            "measures": {
-                "measure_name": {
-                    "Custom Classification": "✅ Added 'Custom Classification' = 'Simple measure'",
-                    "Complexity Level": "✅ Added 'Complexity Level' = 'Low'",
-                    "Category": "✅ Added 'Category' = 'Basic aggregation'",
-                    "Business Domain": "✅ Added 'Business Domain' = 'Sales Pipeline'",
-                    "annotations_count": 4,
-                    "dax_expression": "SUM(table[column])"
-                }
-            }
-        }
-    },
-    "status": "✅ Successfully classified X measures"
-}
-```
+### Dependency Analysis
 
-### Extension Points
+Before renaming objects, the system:
 
-#### Custom Classification Rules
-To add new classification patterns:
-
-1. **Add Pattern Detection Method**
-```python
-def _is_custom_pattern(self, expression: str) -> bool:
-    custom_patterns = [
-        r'CUSTOMFUNCTION\s*\(',
-        # Add your patterns
-    ]
-    for pattern in custom_patterns:
-        if re.search(pattern, expression):
-            return True
-    return False
-```
-
-2. **Update Main Classification Logic**
-```python
-def _auto_classify_measure(self, measure) -> Dict[str, str]:
-    # ... existing logic ...
-    elif self._is_custom_pattern(expression):
-        annotations["Custom Classification"] = "Custom measure type"
-        annotations["Complexity Level"] = "Medium"
-        annotations["Category"] = "Custom calculation"
-```
-
-#### Business Domain Extensions
-Add domain-specific keywords:
-```python
-# In _auto_classify_measure method
-domain_keywords = {
-    "Finance": ["REVENUE", "COST", "PROFIT", "MARGIN"],
-    "HR": ["EMPLOYEE", "HEADCOUNT", "TURNOVER"],
-    "Inventory": ["STOCK", "INVENTORY", "WAREHOUSE"]
-}
-```
+- **Scans References**: Finds all DAX expressions referencing the object
+- **Risk Assessment**: Calculates impact levels (None, Low, Medium, High)
+- **Update Planning**: Plans automatic updates for dependent objects
+- **User Confirmation**: Requires explicit approval for changes
 
 ### Performance Optimization
 
-#### Batch Processing
-The system processes measures in batches to optimize performance:
-- Processes all measures in a table together
-- Single `SaveChanges()` call per table
-- Efficient annotation existence checking
+- **Connection Pooling**: Reuses connections for efficiency
+- **Batch Operations**: Groups operations for better performance
+- **Memory Management**: Proper resource cleanup and disposal
+- **Thread Safety**: Concurrent operation support
 
-#### Memory Management  
-- Minimal object creation during classification
-- Reuse of compiled regex patterns
-- Efficient string operations
+## 🔍 Troubleshooting
 
-#### Error Handling
-- Graceful degradation for classification failures
-- Detailed error logging for troubleshooting
-- Partial success reporting for batch operations
+### Common Issues
 
-## Installation and Setup
+**Connection Problems**:
+```python
+# Test Azure authentication
+from azure.identity import DefaultAzureCredential
+credential = DefaultAzureCredential()
+token = credential.get_token("https://analysis.windows.net/powerbi/api/.default")
+```
 
-### Prerequisites
-- Python 3.8+
-- Power BI Premium or Premium Per User license
-- XMLA read/write permissions
-- Analysis Services libraries
+**Performance Issues**:
+- Check DAX expression complexity
+- Review model relationships
+- Monitor memory usage
+- Use selective table processing
 
-### Dependencies
+**Classification Issues**:
+- Verify DAX expression patterns
+- Check measure naming conventions
+- Review automatic annotations
+
+### Health Monitoring
+
+Built-in health checks for:
+- Azure authentication status
+- XMLA connectivity
+- SQL endpoint availability
+- Fabric API access
+
+## 📚 Documentation
+
+For detailed implementation guides, see:
+- `src/server.py` - Main server implementation
+- `src/client.py` - Client usage examples
+- `test.py` - Testing and validation examples
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests for new functionality
+5. Submit a pull request
+
+### Development Setup
+
 ```bash
+# Setup development environment
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+pip install -r requirements-dev.txt
+
+# Run tests
+pytest tests/
+
+# Format code
+black src/
+isort src/
 ```
 
-### Configuration
-1. Set up Azure authentication
-2. Configure workspace and dataset connections
-3. Set XMLA endpoint permissions
-4. Initialize MCP server
+## 📄 License
 
-### Running the Server
-```bash
-python src/server.py
-```
+This project is licensed under the MIT License. See LICENSE file for details.
 
-The server will start and listen for MCP protocol connections on stdin/stdout.
+## 🔗 Links
+
+- [Power BI Documentation](https://docs.microsoft.com/en-us/power-bi/)
+- [Microsoft Fabric Documentation](https://docs.microsoft.com/en-us/fabric/)
+- [Analysis Services Documentation](https://docs.microsoft.com/en-us/analysis-services/)
+- [Model Context Protocol](https://github.com/modelcontextprotocol)
+
+## 📈 Version History
+
+- **v1.2.0**: Added safe renaming with dependency analysis
+- **v1.1.0**: Enhanced measure classification system
+- **v1.0.1**: Improved error handling and logging
+- **v1.0.0**: Initial release with core functionality
+
+---
+
+**Support**: For issues and questions, please use the GitHub issue tracker.

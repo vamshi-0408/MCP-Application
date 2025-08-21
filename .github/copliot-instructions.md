@@ -30,11 +30,13 @@
 - **Rule 10i**: Bridge table should be the "many" side of relationships to both User and Security dimensions
 - **Rule 10j**: Keep bridge tables lean - only active permissions, regular cleanup of expired records
 
-#### Filter Expression Rules
+#### Security Filter Expression Rules
 - **Rule 11**: Always use `USERPRINCIPALNAME()` or `USERNAME()` for user identification
 - **Rule 12**: Filter expressions should be simple and performant (avoid complex calculations)
 - **Rule 13**: Use `VALUES()` function to return allowed security keys
 - **Rule 14**: Test filters with `CALCULATETABLE()` for complex scenarios
+- **Rule 15**: Use Fully Qualified Names for the Expression. 
+- **Rule 16**: Generate only the DAX expression on the right-hand side of the = sign. Do not include the measure name or anything before the equals sign."
 
 #### Security Role Rules
 - **Rule 15**: Create separate roles for different security levels (subsidiary, region, seller)

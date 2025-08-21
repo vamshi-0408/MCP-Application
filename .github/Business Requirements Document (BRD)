@@ -1,13 +1,14 @@
 ### Lakehouse Creation
-- Create BilledPipelineLH_vare lakehouse in OCT-Dev workspace.
+- Create BilledPipelineLH_demo6 lakehouse in OCT-Dev workspace.
 
 ### Shortcuts Creations
-- Create shortcuts by considering the MSBilledPipelineLH lakehouse from MSXI-BilledPipeline02 workspace and get the below source tables and create shortcuts in OCT-Dev Workspace and BilledPipelineLH_vare Lakehouse.
+- Create shortcuts by considering the MSBilledPipelineLH lakehouse from MSXI-BilledPipeline02 workspace and get the below source tables and create shortcuts in OCT-Dev Workspace and BilledPipelineLH_demo6 Lakehouse.
 source tables:
 ext_factsoftwarepipeline
 ext_dimsalesdate
 ext_dimopportunity
 ext_dimpricinglevel
+ext_dimsubsidiary
 ext_sec_userbusiness
 ext_dimbusiness
 ext_dimproduct
@@ -21,19 +22,27 @@ ext_dimaccountgeography
 - Get the list of tables in sql endpoint
 
 ### Semantic Model Creation
-- Create BilledPipelineSM_vare Semantic Model in OCT-Dev workspace using the above lakehouse & shortcuts created
+- Create BilledPipelineSM_demo6 Semantic Model in OCT-Dev workspace using the above lakehouse & shortcuts created
 - Identify eligible date tables. 
 - Mark the date table
+
+### Create security Role
+1. User Subsidiary Role:
+- Create security table role show only Current User related subidiaries
+- Ensure the DAX expression needs to be fully qualified column references
+- validate role dax expression after creating, make sure no errors.
+ 
+3. User Business Role
+- Create rls on business it should show only current user related businesses with VAR expression
+- Ensure the DAX expression needs to be fully qualified column references
+- validate role dax expression after creating, make sure no errors.
 
 ### Relationships
 - Provide a detailed description of all tables in the connected models.
 - Check each table to determine whether it contains a unique key column or the lowest-granularity column.
 - Establish the correct relationships between fact and dimension tables, and identify security-related tables in the model.
 
-### Create security tables
-1. User Subsidiary Role: 
-- Identify the User Subsidiary table in semantic model.
-- Create security table role show only Current User related subidiaries 
 # KPI's & Measures
 - Create the key performance indicator measures, which can be used by the leaders and sellers.
+- Validate each and every measure dax query created dax in previous step.
 - classify all measures in model
